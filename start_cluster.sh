@@ -23,6 +23,11 @@ NAME="${HEAD_CONTAINER_NAME:-${NAME:-ray-head}}"
 HF_CACHE="${HF_CACHE:-/raid/hf-cache}"
 HF_TOKEN="${HF_TOKEN:-}"
 RAY_VERSION="${RAY_VERSION:-2.54.0}"
+# Offline mode: skip the HF download step and run vLLM/HF in offline mode.
+# Set SKIP_MODEL_DOWNLOAD=1 when the HF cache is already populated (air-gapped
+# Spark, or model copied from another machine). The script will verify the
+# model is present in ${HF_CACHE}/hub/ before launching vLLM.
+SKIP_MODEL_DOWNLOAD="${SKIP_MODEL_DOWNLOAD:-}"
 
 # Worker node configuration (for orchestrated setup)
 # WORKER_HOST: Ethernet IP for SSH access (e.g., 192.168.7.111)
@@ -549,6 +554,14 @@ if [ -n "${HF_TOKEN}" ]; then
   ENV_ARGS+=(-e HF_TOKEN="${HF_TOKEN}")
 fi
 
+# Offline mode: prevent HF/Transformers from making network calls inside the container
+if [ -n "${SKIP_MODEL_DOWNLOAD}" ]; then
+  ENV_ARGS+=(
+    -e HF_HUB_OFFLINE=1
+    -e TRANSFORMERS_OFFLINE=1
+  )
+fi
+
 # Build Docker run command
 # HF cache is mounted to /root/.cache/huggingface
 DOCKER_ARGS=(
@@ -625,26 +638,32 @@ log "  ✅ Ray ${INSTALLED_RAY_VERSION} available"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-log "Step 6/${TOTAL_STEPS}: Pre-downloading model weights"
-log "  Model: ${MODEL}"
-log "  This may take a while for large models on first download..."
+if [ -n "${SKIP_MODEL_DOWNLOAD}" ]; then
+  log "Step 6/${TOTAL_STEPS}: Verifying pre-staged model weights (offline mode)"
+  log "  Model: ${MODEL}"
+  log "  Skipping download - SKIP_MODEL_DOWNLOAD is set"
+else
+  log "Step 6/${TOTAL_STEPS}: Pre-downloading model weights"
+  log "  Model: ${MODEL}"
+  log "  This may take a while for large models on first download..."
 
-# Build HF token arg if provided
-HF_TOKEN_ARG=""
-if [ -n "${HF_TOKEN}" ]; then
-  HF_TOKEN_ARG="--token ${HF_TOKEN}"
+  # Build HF token arg if provided
+  HF_TOKEN_ARG=""
+  if [ -n "${HF_TOKEN}" ]; then
+    HF_TOKEN_ARG="--token ${HF_TOKEN}"
+  fi
+
+  # Download model with verification
+  if ! docker exec "${NAME}" bash -lc "
+    export HF_HOME=/root/.cache/huggingface
+    echo '  Downloading model files (excluding original/* and metal/* to save space)...'
+    hf download ${MODEL} ${HF_TOKEN_ARG} --exclude 'original/*' --exclude 'metal/*' 2>&1 | tail -5
+  "; then
+    error "Failed to download model ${MODEL}"
+  fi
 fi
 
-# Download model with verification
-if ! docker exec "${NAME}" bash -lc "
-  export HF_HOME=/root/.cache/huggingface
-  echo '  Downloading model files (excluding original/* and metal/* to save space)...'
-  hf download ${MODEL} ${HF_TOKEN_ARG} --exclude 'original/*' --exclude 'metal/*' 2>&1 | tail -5
-"; then
-  error "Failed to download model ${MODEL}"
-fi
-
-# Verify model was downloaded by checking for config.json
+# Verify model is present in the cache (works for both online and offline paths)
 if ! docker exec "${NAME}" bash -lc "
   export HF_HOME=/root/.cache/huggingface
   python3 -c \"
@@ -657,62 +676,82 @@ if not os.path.exists(config_path):
 print(f'  ✅ Model verified at: {path}')
 \"
 "; then
-  error "Model verification failed - config.json not found"
+  if [ -n "${SKIP_MODEL_DOWNLOAD}" ]; then
+    error "Model not found in ${HF_CACHE}/hub/ - populate the cache before running with SKIP_MODEL_DOWNLOAD=1, or unset it to download"
+  else
+    error "Model verification failed - config.json not found"
+  fi
 fi
 
-log "  Model download complete and verified"
+if [ -n "${SKIP_MODEL_DOWNLOAD}" ]; then
+  log "  Model verified in local cache"
+else
+  log "  Model download complete and verified"
+fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Worker orchestration steps (only if WORKER_HOST is set)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 if [ -n "${WORKER_HOST}" ]; then
-  log "Step 7/${TOTAL_STEPS}: Syncing model to worker node"
-  log "  Worker host: ${WORKER_USER}@${WORKER_HOST}"
-  log "  Source: ${HF_CACHE}/"
-  log "  Destination: ${WORKER_HF_CACHE}/"
-  log ""
-  log "  This may take a while for large models..."
+  if [ -n "${SKIP_MODEL_DOWNLOAD}" ]; then
+    log "Step 7/${TOTAL_STEPS}: Skipping model rsync (offline mode)"
+    log "  SKIP_MODEL_DOWNLOAD is set - worker is expected to have its own"
+    log "  pre-staged HF cache at ${WORKER_HF_CACHE}/hub/."
 
-  # Test SSH connectivity first
-  if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${WORKER_HOST}" "echo 'SSH OK'" >/dev/null 2>&1; then
-    error "Cannot SSH to ${WORKER_USER}@${WORKER_HOST}. Please ensure:"$'\n'"  1. SSH keys are set up (ssh-copy-id ${WORKER_USER}@${WORKER_HOST})"$'\n'"  2. The worker host is reachable"
-  fi
-  log "  ✅ SSH connectivity verified"
-
-  # Ensure destination directory exists and fix permissions if needed
-  ssh "${WORKER_USER}@${WORKER_HOST}" "
-    mkdir -p ${WORKER_HF_CACHE}/hub
-    # Fix ownership if directories exist but are owned by root (from Docker)
-    if [ -d '${WORKER_HF_CACHE}' ] && [ ! -w '${WORKER_HF_CACHE}' ]; then
-      echo 'Fixing permissions on ${WORKER_HF_CACHE} (requires sudo)...'
-      sudo chown -R \$(id -u):\$(id -g) '${WORKER_HF_CACHE}' 2>/dev/null || true
+    # Still need SSH to start the worker, so verify it now
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${WORKER_HOST}" "echo 'SSH OK'" >/dev/null 2>&1; then
+      error "Cannot SSH to ${WORKER_USER}@${WORKER_HOST}. Please ensure:"$'\n'"  1. SSH keys are set up (ssh-copy-id ${WORKER_USER}@${WORKER_HOST})"$'\n'"  2. The worker host is reachable"
     fi
-  "
+    log "  ✅ SSH connectivity verified"
+  else
+    log "Step 7/${TOTAL_STEPS}: Syncing model to worker node"
+    log "  Worker host: ${WORKER_USER}@${WORKER_HOST}"
+    log "  Source: ${HF_CACHE}/"
+    log "  Destination: ${WORKER_HF_CACHE}/"
+    log ""
+    log "  This may take a while for large models..."
 
-  # Convert model name to HF cache directory format (e.g., openai/gpt-oss-120b -> models--openai--gpt-oss-120b)
-  MODEL_CACHE_NAME="models--$(echo "${MODEL}" | sed 's|/|--|g')"
-  MODEL_CACHE_PATH="${HF_CACHE}/hub/${MODEL_CACHE_NAME}"
+    # Test SSH connectivity first
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${WORKER_HOST}" "echo 'SSH OK'" >/dev/null 2>&1; then
+      error "Cannot SSH to ${WORKER_USER}@${WORKER_HOST}. Please ensure:"$'\n'"  1. SSH keys are set up (ssh-copy-id ${WORKER_USER}@${WORKER_HOST})"$'\n'"  2. The worker host is reachable"
+    fi
+    log "  ✅ SSH connectivity verified"
 
-  if [ ! -d "${MODEL_CACHE_PATH}" ]; then
-    error "Model cache not found at ${MODEL_CACHE_PATH}. Download the model first."
+    # Ensure destination directory exists and fix permissions if needed
+    ssh "${WORKER_USER}@${WORKER_HOST}" "
+      mkdir -p ${WORKER_HF_CACHE}/hub
+      # Fix ownership if directories exist but are owned by root (from Docker)
+      if [ -d '${WORKER_HF_CACHE}' ] && [ ! -w '${WORKER_HF_CACHE}' ]; then
+        echo 'Fixing permissions on ${WORKER_HF_CACHE} (requires sudo)...'
+        sudo chown -R \$(id -u):\$(id -g) '${WORKER_HF_CACHE}' 2>/dev/null || true
+      fi
+    "
+
+    # Convert model name to HF cache directory format (e.g., openai/gpt-oss-120b -> models--openai--gpt-oss-120b)
+    MODEL_CACHE_NAME="models--$(echo "${MODEL}" | sed 's|/|--|g')"
+    MODEL_CACHE_PATH="${HF_CACHE}/hub/${MODEL_CACHE_NAME}"
+
+    if [ ! -d "${MODEL_CACHE_PATH}" ]; then
+      error "Model cache not found at ${MODEL_CACHE_PATH}. Download the model first."
+    fi
+
+    log "  Syncing model: ${MODEL_CACHE_NAME}"
+    log "  From: ${MODEL_CACHE_PATH}"
+    log "  To:   ${WORKER_USER}@${WORKER_HOST}:${WORKER_HF_CACHE}/hub/"
+
+    # Rsync only the specific model directory (exclude lock files)
+    # Use --no-perms --no-owner --no-group to avoid permission issues with mixed ownership
+    if ! rsync -a --info=progress2 --human-readable \
+      --no-perms --no-owner --no-group \
+      --exclude='.locks' \
+      --exclude='*.lock' \
+      "${MODEL_CACHE_PATH}" \
+      "${WORKER_USER}@${WORKER_HOST}:${WORKER_HF_CACHE}/hub/"; then
+      error "Failed to rsync model to worker node"
+    fi
+    log "  ✅ Model synced to worker"
   fi
-
-  log "  Syncing model: ${MODEL_CACHE_NAME}"
-  log "  From: ${MODEL_CACHE_PATH}"
-  log "  To:   ${WORKER_USER}@${WORKER_HOST}:${WORKER_HF_CACHE}/hub/"
-
-  # Rsync only the specific model directory (exclude lock files)
-  # Use --no-perms --no-owner --no-group to avoid permission issues with mixed ownership
-  if ! rsync -a --info=progress2 --human-readable \
-    --no-perms --no-owner --no-group \
-    --exclude='.locks' \
-    --exclude='*.lock' \
-    "${MODEL_CACHE_PATH}" \
-    "${WORKER_USER}@${WORKER_HOST}:${WORKER_HF_CACHE}/hub/"; then
-    error "Failed to rsync model to worker node"
-  fi
-  log "  ✅ Model synced to worker"
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -898,7 +937,9 @@ if [ -n "${EXTRA_ARGS}" ]; then
 fi
 
 # Start vLLM in background using nohup
-# Note: We do NOT set HF_HUB_OFFLINE=1 here because workers need to resolve the model name
+# Note: HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are set in the container env only
+# when SKIP_MODEL_DOWNLOAD=1 (see ENV_ARGS above). In online mode we leave them
+# unset so the model name can be resolved against huggingface.co.
 docker exec "${NAME}" bash -lc "
   export HF_HOME=/root/.cache/huggingface
   export RAY_ADDRESS=127.0.0.1:${RAY_PORT}
