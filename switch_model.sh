@@ -24,7 +24,16 @@ fi
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Model HuggingFace IDs
+#
+# Models tagged [NVIDIA] are from the official Spark vLLM playbook
+# (https://build.nvidia.com/spark/vllm/instructions). [community] entries are
+# additional models that work but are not on NVIDIA's published matrix.
+#
+# Adding new entries: append to ALL parallel arrays (MODELS, MODEL_NAMES,
+# MODEL_QUANT, MODEL_IMAGE, MODEL_TP, MODEL_NODES, MODEL_GPU_MEM,
+# MODEL_MAX_LEN, MODEL_TRUST_REMOTE, MODEL_NEEDS_TOKEN, MODEL_EXPERT_PARALLEL).
 MODELS=(
+  # ── [community] entries (existing, not in NVIDIA's official matrix) ──
   "openai/gpt-oss-120b"
   "openai/gpt-oss-20b"
   "Qwen/Qwen2.5-7B-Instruct"
@@ -41,32 +50,130 @@ MODELS=(
   "CohereForAI/c4ai-command-r-plus-08-2024"
   "nvidia/Llama-3.1-405B-Instruct-FP4"
   "meta-llama/Llama-3.3-70B-Instruct"
+  # ── [NVIDIA] entries (from build.nvidia.com/spark/vllm/instructions) ──
+  # Llama family
+  "nvidia/Llama-3.1-8B-Instruct-FP8"
+  "nvidia/Llama-3.1-8B-Instruct-NVFP4"
+  "nvidia/Llama-3.3-70B-Instruct-NVFP4"
+  # Qwen3 family
+  "nvidia/Qwen3-8B-FP8"
+  "nvidia/Qwen3-8B-NVFP4"
+  "nvidia/Qwen3-14B-FP8"
+  "nvidia/Qwen3-14B-NVFP4"
+  "nvidia/Qwen3-32B-NVFP4"
+  # Qwen multimodal / reranker / embedding
+  "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4"
+  "Qwen/Qwen3-VL-Reranker-2B"
+  "Qwen/Qwen3-VL-Reranker-8B"
+  "Qwen/Qwen3-VL-Embedding-2B"
+  # Phi-4 family
+  "nvidia/Phi-4-multimodal-instruct-FP8"
+  "nvidia/Phi-4-multimodal-instruct-NVFP4"
+  "nvidia/Phi-4-reasoning-plus-FP8"
+  "nvidia/Phi-4-reasoning-plus-NVFP4"
+  # Nemotron-3
+  "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+  "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
+  "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+  # Gemma 4 (uses a different vLLM image - see MODEL_IMAGE below)
+  "google/gemma-4-E2B-it"
+  "google/gemma-4-E4B-it"
+  "google/gemma-4-26B-A4B-it"
+  "google/gemma-4-31B-it"
+  "nvidia/Gemma-4-31B-IT-NVFP4"
+  # NVIDIA's TP=4 example for switched-Spark setups
+  "MiniMaxAI/MiniMax-M2.5"
 )
 
 # Human-readable model descriptions
 MODEL_NAMES=(
-  "GPT-OSS-120B (120B params, MoE, native MXFP4 ~65GB, high quality)"
-  "GPT-OSS-20B (21B params, MoE, ~16-20GB, fast)"
-  "Qwen2.5-7B (7B params, ~7GB, very fast)"
-  "Qwen2.5-14B (14B params, ~14GB, fast)"
-  "Qwen2.5-32B (32B params, ~30GB, strong mid-size)"
-  "Qwen2.5-72B (72B params, ~70GB, slow, high quality)"
-  "Mistral-7B v0.3 (7B params, ~7GB, very fast)"
-  "Mistral-Nemo-12B (12B params, ~12GB, 128k context)"
-  "Mixtral-8x7B (47B total, 12B active, ~45GB, MoE, fast)"
-  "Llama-3.1-8B (8B params, ~8GB, very fast)"
-  "Llama-3.1-70B (70B params, ~65GB, high quality)"
-  "Phi-4 (15B params, ~14-16GB, small but smart)"
-  "Gemma2-27B (27B params, ~24-28GB, strong mid-size)"
-  "Command-R-Plus (104B params, BF16 ~208GB, requires 2 Sparks)"
-  "Llama-3.1-405B-FP4 (405B params, FP4 ~200GB, requires 2 Sparks)"
-  "Llama-3.3-70B (70B params, BF16 ~141GB, requires 2 Sparks)"
+  # ── [community] ──
+  "[community] GPT-OSS-120B (120B MoE, native MXFP4 ~65GB, high quality)"
+  "[community] GPT-OSS-20B (21B MoE, ~16-20GB, fast)"
+  "[community] Qwen2.5-7B (7B, ~7GB, very fast)"
+  "[community] Qwen2.5-14B (14B, ~14GB, fast)"
+  "[community] Qwen2.5-32B (32B, ~30GB, strong mid-size)"
+  "[community] Qwen2.5-72B (72B, ~70GB, slow, high quality)"
+  "[community] Mistral-7B v0.3 (7B, ~7GB, very fast)"
+  "[community] Mistral-Nemo-12B (12B, ~12GB, 128k context)"
+  "[community] Mixtral-8x7B (47B total, 12B active, ~45GB, MoE)"
+  "[community] Llama-3.1-8B (8B, ~8GB, very fast)"
+  "[community] Llama-3.1-70B (70B, ~65GB, high quality)"
+  "[community] Phi-4 (15B, ~14-16GB, small but smart)"
+  "[community] Gemma2-27B (27B, ~24-28GB, strong mid-size)"
+  "[community] Command-R-Plus (104B BF16 ~208GB, 2 Sparks)"
+  "[community] Llama-3.1-405B-FP4 (405B FP4 ~200GB, 2 Sparks)"
+  "[community] Llama-3.3-70B (70B BF16 ~141GB, 2 Sparks)"
+  # ── [NVIDIA] ──
+  "[NVIDIA] Llama-3.1-8B-Instruct FP8 (~8GB)"
+  "[NVIDIA] Llama-3.1-8B-Instruct NVFP4 (~4GB)"
+  "[NVIDIA] Llama-3.3-70B-Instruct NVFP4 (~35GB)"
+  "[NVIDIA] Qwen3-8B FP8 (~8GB)"
+  "[NVIDIA] Qwen3-8B NVFP4 (~4GB)"
+  "[NVIDIA] Qwen3-14B FP8 (~14GB)"
+  "[NVIDIA] Qwen3-14B NVFP4 (~7GB)"
+  "[NVIDIA] Qwen3-32B NVFP4 (~16GB)"
+  "[NVIDIA] Qwen2.5-VL-7B-Instruct NVFP4 (multimodal, ~4GB)"
+  "[NVIDIA] Qwen3-VL-Reranker-2B (reranker, ~4GB)"
+  "[NVIDIA] Qwen3-VL-Reranker-8B (reranker, ~16GB)"
+  "[NVIDIA] Qwen3-VL-Embedding-2B (embedding, ~4GB)"
+  "[NVIDIA] Phi-4-multimodal-instruct FP8 (multimodal, trust_remote)"
+  "[NVIDIA] Phi-4-multimodal-instruct NVFP4 (multimodal, trust_remote)"
+  "[NVIDIA] Phi-4-reasoning-plus FP8 (reasoning, ~14GB)"
+  "[NVIDIA] Phi-4-reasoning-plus NVFP4 (reasoning, ~7GB)"
+  "[NVIDIA] Nemotron-3-Nano-30B-A3B BF16 (MoE, ~60GB)"
+  "[NVIDIA] Nemotron-3-Nano-30B-A3B FP8 (MoE, ~30GB)"
+  "[NVIDIA] Nemotron-3-Super-120B-A12B NVFP4 (MoE, 2 Sparks)"
+  "[NVIDIA] Gemma 4 E2B IT (Base, ~4GB, gemma4 image)"
+  "[NVIDIA] Gemma 4 E4B IT (Base, ~8GB, gemma4 image)"
+  "[NVIDIA] Gemma 4 26B A4B IT (Base, ~52GB, gemma4 image)"
+  "[NVIDIA] Gemma 4 31B IT (Base, ~62GB, gemma4 image)"
+  "[NVIDIA] Gemma 4 31B IT NVFP4 (~16GB)"
+  "[NVIDIA] MiniMax-M2.5 (MoE, TP=4 across 4 Sparks per NVIDIA example)"
+)
+
+# Quantization label (purely informational — vLLM picks up actual quant from
+# the model's config.json). Use one of: BF16, FP8, NVFP4, MXFP4, FP4, AWQ.
+MODEL_QUANT=(
+  # [community]
+  "MXFP4" "MXFP4" "BF16" "BF16" "BF16" "BF16" "BF16" "BF16" "BF16"
+  "BF16" "BF16" "BF16" "BF16" "BF16" "FP4"  "BF16"
+  # [NVIDIA]
+  "FP8"   "NVFP4" "NVFP4"
+  "FP8"   "NVFP4" "FP8"   "NVFP4" "NVFP4"
+  "NVFP4" "BF16"  "BF16"  "BF16"
+  "FP8"   "NVFP4" "FP8"   "NVFP4"
+  "BF16"  "FP8"   "NVFP4"
+  "BF16"  "BF16"  "BF16"  "BF16"  "NVFP4"
+  "BF16"
+)
+
+# Optional per-model VLLM_IMAGE override. Leave empty ("") to use the default
+# IMAGE from config.env / start_cluster.sh. NVIDIA ships Gemma 4 in a separate
+# image because the family currently requires CUDA 13.0 specific kernels.
+MODEL_IMAGE=(
+  # [community] - all use default
+  "" "" "" "" "" "" "" "" ""
+  "" "" "" "" "" "" ""
+  # [NVIDIA] - Gemma 4 family overrides
+  "" "" ""
+  "" "" "" "" ""
+  "" "" "" ""
+  "" "" "" ""
+  "" "" ""
+  "vllm/vllm-openai:gemma4-cu130"
+  "vllm/vllm-openai:gemma4-cu130"
+  "vllm/vllm-openai:gemma4-cu130"
+  "vllm/vllm-openai:gemma4-cu130"
+  ""
+  ""
 )
 
 # Tensor Parallelism (number of GPUs needed)
-# Models that fit in a single DGX Spark's ~120GB VRAM use TP=1;
-# larger models that must be split across two Sparks use TP=2.
+# Models that fit in a single DGX Spark's ~120GB unified memory use TP=1;
+# larger models that must be split across multiple Sparks use TP=N.
 MODEL_TP=(
+  # ── [community] ──
   1    # gpt-oss-120b - native MXFP4 ~65GB
   1    # gpt-oss-20b - ~16-20GB
   1    # Qwen2.5-7B - ~7GB
@@ -80,129 +187,174 @@ MODEL_TP=(
   1    # Llama-3.1-70B - ~65GB
   1    # Phi-4 - ~14-16GB
   1    # Gemma2-27B - ~24-28GB
-  2    # Command-R-Plus - BF16 ~208GB, needs 2 Sparks
-  2    # Llama-3.1-405B-FP4 - ~200GB, needs 2 Sparks
-  2    # Llama-3.3-70B - BF16 ~141GB, needs 2 Sparks
+  2    # Command-R-Plus - BF16 ~208GB, 2 Sparks
+  2    # Llama-3.1-405B-FP4 - ~200GB, 2 Sparks
+  2    # Llama-3.3-70B - BF16 ~141GB, 2 Sparks
+  # ── [NVIDIA] ──
+  1    # Llama-3.1-8B-FP8 - ~8GB
+  1    # Llama-3.1-8B-NVFP4 - ~4GB
+  1    # Llama-3.3-70B-NVFP4 - ~35GB
+  1    # Qwen3-8B-FP8 - ~8GB
+  1    # Qwen3-8B-NVFP4 - ~4GB
+  1    # Qwen3-14B-FP8 - ~14GB
+  1    # Qwen3-14B-NVFP4 - ~7GB
+  1    # Qwen3-32B-NVFP4 - ~16GB
+  1    # Qwen2.5-VL-7B NVFP4 - ~4GB
+  1    # Qwen3-VL-Reranker-2B - ~4GB
+  1    # Qwen3-VL-Reranker-8B - ~16GB
+  1    # Qwen3-VL-Embedding-2B - ~4GB
+  1    # Phi-4-multimodal FP8 - ~14GB
+  1    # Phi-4-multimodal NVFP4 - ~7GB
+  1    # Phi-4-reasoning-plus FP8 - ~14GB
+  1    # Phi-4-reasoning-plus NVFP4 - ~7GB
+  1    # Nemotron-3-Nano-30B-A3B BF16 - ~60GB
+  1    # Nemotron-3-Nano-30B-A3B FP8 - ~30GB
+  2    # Nemotron-3-Super-120B-A12B NVFP4 - 2 Sparks
+  1    # Gemma 4 E2B - ~4GB
+  1    # Gemma 4 E4B - ~8GB
+  1    # Gemma 4 26B A4B - ~52GB
+  1    # Gemma 4 31B - ~62GB
+  1    # Gemma 4 31B NVFP4 - ~16GB
+  4    # MiniMax-M2.5 - NVIDIA's TP=4 example, 4 Sparks
 )
 
-# Number of nodes required (1 for models that fit on a single Spark, 2 otherwise)
+# Minimum number of Sparks required (1 = fits on a single Spark, 2+ = needs
+# multi-Spark TP). The menu groups models by this count for display.
 MODEL_NODES=(
-  1    # gpt-oss-120b
-  1    # gpt-oss-20b
-  1    # Qwen2.5-7B
-  1    # Qwen2.5-14B
-  1    # Qwen2.5-32B
-  1    # Qwen2.5-72B
-  1    # Mistral-7B
-  1    # Mistral-Nemo-12B
-  1    # Mixtral-8x7B
-  1    # Llama-3.1-8B
-  1    # Llama-3.1-70B
-  1    # Phi-4
-  1    # Gemma2-27B
-  2    # Command-R-Plus
-  2    # Llama-3.1-405B-FP4
-  2    # Llama-3.3-70B
+  # ── [community] ──
+  1 1 1 1 1 1 1 1 1 1 1 1 1
+  2 2 2
+  # ── [NVIDIA] ──
+  1 1 1                  # Llama-3.1-8B FP8/NVFP4, Llama-3.3-70B NVFP4
+  1 1 1 1 1              # Qwen3-{8B FP8, 8B NVFP4, 14B FP8, 14B NVFP4, 32B NVFP4}
+  1 1 1 1                # Qwen2.5-VL NVFP4 + Qwen3-VL Reranker x2 + Embedding
+  1 1 1 1                # Phi-4 multimodal x2 + reasoning-plus x2
+  1 1 2                  # Nemotron-3-Nano BF16 + FP8, Nemotron-3-Super (2 Sparks)
+  1 1 1 1 1              # Gemma 4 E2B, E4B, 26B, 31B, 31B-NVFP4
+  4                      # MiniMax-M2.5 (NVIDIA's 4-Spark example)
 )
 
 # GPU Memory Utilization (0.90 default)
 MODEL_GPU_MEM=(
-  0.90  # gpt-oss-120b
-  0.90  # gpt-oss-20b
-  0.90  # Qwen2.5-7B
-  0.90  # Qwen2.5-14B
-  0.90  # Qwen2.5-32B
-  0.90  # Qwen2.5-72B
-  0.90  # Mistral-7B
-  0.90  # Mistral-Nemo-12B
-  0.90  # Mixtral-8x7B
-  0.90  # Llama-3.1-8B
-  0.90  # Llama-3.1-70B
-  0.90  # Phi-4
-  0.90  # Gemma2-27B
-  0.90  # Command-R-Plus
-  0.90  # Llama-3.1-405B-FP4
-  0.90  # Llama-3.3-70B
+  # [community]
+  0.90 0.90 0.90 0.90 0.90 0.90 0.90 0.90 0.90 0.90 0.90 0.90 0.90
+  0.90 0.90 0.90
+  # [NVIDIA]
+  0.90 0.90 0.90
+  0.90 0.90 0.90 0.90 0.90
+  0.90 0.90 0.90 0.90
+  0.90 0.90 0.90 0.90
+  0.90 0.90 0.90
+  0.90 0.90 0.90 0.90 0.90
+  0.90
 )
 
-# Max model length (context window)
+# Max model length (context window) - chosen to balance the model's published
+# limit against KV-cache memory pressure on 120GB unified memory.
 MODEL_MAX_LEN=(
+  # ── [community] ──
   8192   # gpt-oss-120b
   8192   # gpt-oss-20b
-  32768  # Qwen2.5-7B - supports up to 131k, but limit for memory
+  32768  # Qwen2.5-7B
   32768  # Qwen2.5-14B
   32768  # Qwen2.5-32B
   32768  # Qwen2.5-72B
   32768  # Mistral-7B v0.3
-  131072 # Mistral-Nemo-12B - 128k context
+  131072 # Mistral-Nemo-12B (native 128k)
   32768  # Mixtral-8x7B
-  131072 # Llama-3.1-8B - 128k context
-  131072 # Llama-3.1-70B - 128k context
+  131072 # Llama-3.1-8B (native 128k)
+  131072 # Llama-3.1-70B (native 128k)
   16384  # Phi-4
   8192   # Gemma2-27B
-  32768  # Command-R-Plus - supports 128k, limit for KV cache memory
-  16384  # Llama-3.1-405B-FP4 - very large, keep context modest
-  32768  # Llama-3.3-70B - supports 128k, limit for KV cache memory
+  32768  # Command-R-Plus (native 128k)
+  16384  # Llama-3.1-405B-FP4 (very large)
+  32768  # Llama-3.3-70B (native 128k)
+  # ── [NVIDIA] ──
+  131072 # Llama-3.1-8B-FP8
+  131072 # Llama-3.1-8B-NVFP4
+  32768  # Llama-3.3-70B-NVFP4
+  32768  # Qwen3-8B-FP8
+  32768  # Qwen3-8B-NVFP4
+  32768  # Qwen3-14B-FP8
+  32768  # Qwen3-14B-NVFP4
+  32768  # Qwen3-32B-NVFP4
+  32768  # Qwen2.5-VL-7B-NVFP4
+  8192   # Qwen3-VL-Reranker-2B (reranker - short ctx is fine)
+  8192   # Qwen3-VL-Reranker-8B
+  8192   # Qwen3-VL-Embedding-2B (embedder)
+  16384  # Phi-4-multimodal-FP8
+  16384  # Phi-4-multimodal-NVFP4
+  16384  # Phi-4-reasoning-plus-FP8
+  16384  # Phi-4-reasoning-plus-NVFP4
+  32768  # Nemotron-3-Nano BF16
+  32768  # Nemotron-3-Nano FP8
+  32768  # Nemotron-3-Super-NVFP4
+  8192   # Gemma 4 E2B
+  8192   # Gemma 4 E4B
+  8192   # Gemma 4 26B
+  8192   # Gemma 4 31B
+  8192   # Gemma 4 31B NVFP4
+  129000 # MiniMax-M2.5 (NVIDIA's example uses 129000)
 )
 
-# Trust remote code flag
+# Trust remote code flag (required for some custom architectures)
 MODEL_TRUST_REMOTE=(
-  false  # gpt-oss-120b
-  false  # gpt-oss-20b
-  false  # Qwen2.5-7B
-  false  # Qwen2.5-14B
-  false  # Qwen2.5-32B
-  false  # Qwen2.5-72B
-  false  # Mistral-7B
-  false  # Mistral-Nemo-12B
-  false  # Mixtral-8x7B
-  false  # Llama-3.1-8B
-  false  # Llama-3.1-70B
-  true   # Phi-4 - requires trust_remote_code
-  false  # Gemma2-27B
-  false  # Command-R-Plus
-  false  # Llama-3.1-405B-FP4
-  false  # Llama-3.3-70B
+  # [community]
+  false false false false false false false false false
+  false false true   # phi-4
+  false false false false
+  # [NVIDIA] - Phi-4-multimodal and MiniMax need trust_remote_code per docs
+  false false false              # Llama-3.1-8B FP8/NVFP4, Llama-3.3-70B
+  false false false false false  # Qwen3 family
+  false false false false        # Qwen2.5-VL + Qwen3-VL
+  true  true  false false        # Phi-4-multimodal (trust_remote), Phi-4-reasoning
+  false false false              # Nemotron-3-Nano + Super
+  false false false false false  # Gemma 4 family
+  true                           # MiniMax-M2.5 (NVIDIA explicitly uses --trust-remote-code)
 )
 
-# Requires HF token (gated models)
+# Requires HF token (gated models). NVIDIA-quantized derivatives of gated
+# upstream models (e.g. nvidia/Llama-3.1-8B-Instruct-NVFP4) may still need a
+# token for the original Meta/Google license check.
 MODEL_NEEDS_TOKEN=(
-  false  # gpt-oss-120b
-  false  # gpt-oss-20b
-  false  # Qwen2.5-7B
-  false  # Qwen2.5-14B
-  false  # Qwen2.5-32B
-  false  # Qwen2.5-72B
-  false  # Mistral-7B
-  false  # Mistral-Nemo-12B
-  false  # Mixtral-8x7B
-  true   # Llama-3.1-8B - gated
-  true   # Llama-3.1-70B - gated
-  false  # Phi-4
-  true   # Gemma2-27B - gated
-  true   # Command-R-Plus - gated
-  true   # Llama-3.1-405B-FP4 - gated (Meta Llama license)
-  true   # Llama-3.3-70B - gated
+  # [community]
+  false false false false false false false false false
+  true  true  false true  true  true  true     # Llama, Gemma2, CommandR, 405B-FP4, 3.3-70B
+  # [NVIDIA] Llama family - gated (Meta license)
+  true  true  true
+  # [NVIDIA] Qwen3 - publicly redistributable
+  false false false false false
+  # [NVIDIA] Qwen2.5-VL public, Qwen3-VL Reranker/Embedding from Qwen org
+  false false false false
+  # [NVIDIA] Phi-4 family - public
+  false false false false
+  # [NVIDIA] Nemotron-3 - public
+  false false false
+  # [NVIDIA] Gemma 4 family - gated (Google license)
+  true  true  true  true  true
+  # MiniMax public
+  false
 )
 
-# Enable expert parallel for MoE models
+# Enable expert parallel for MoE models (one entry per index in MODELS).
 MODEL_EXPERT_PARALLEL=(
-  true   # gpt-oss-120b - MoE
-  true   # gpt-oss-20b - MoE
-  false  # Qwen2.5-7B
-  false  # Qwen2.5-14B
-  false  # Qwen2.5-32B
-  false  # Qwen2.5-72B
-  false  # Mistral-7B
-  false  # Mistral-Nemo-12B
-  true   # Mixtral-8x7B - MoE
-  false  # Llama-3.1-8B
-  false  # Llama-3.1-70B
-  false  # Phi-4
-  false  # Gemma2-27B
-  false  # Command-R-Plus
-  false  # Llama-3.1-405B-FP4
-  false  # Llama-3.3-70B
+  # [community]
+  true  true  false false false false false false true
+  false false false false false false false
+  # [NVIDIA] Llama family - dense
+  false false false
+  # [NVIDIA] Qwen3 - dense
+  false false false false false
+  # [NVIDIA] Qwen multimodal/reranker/embedding - dense
+  false false false false
+  # [NVIDIA] Phi-4 - dense
+  false false false false
+  # [NVIDIA] Nemotron-3-Nano-30B-A3B is MoE (A3B = active 3B), Super-120B-A12B is MoE
+  true  true  true
+  # [NVIDIA] Gemma 4 26B-A4B is MoE; rest are dense
+  false false true  false false
+  # MiniMax-M2.5 is MoE
+  true
 )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -259,7 +411,7 @@ is_model_downloaded() {
   fi
 }
 
-# Download model using huggingface-cli
+# Download model using the modern `hf` CLI (huggingface-cli is deprecated).
 download_model() {
   local model="$1"
   local token_arg=""
@@ -272,18 +424,22 @@ download_model() {
   log "  Destination: ${HF_CACHE}/hub/"
   log "  Excluding: original/*, metal/* (to save space)"
 
-  # Use huggingface-cli for reliable downloads
-  HF_HOME="${HF_CACHE}" huggingface-cli download "${model}" ${token_arg} --exclude "original/*" --exclude "metal/*" 2>&1 | tail -10
+  HF_HOME="${HF_CACHE}" hf download "${model}" ${token_arg} --exclude "original/*" --exclude "metal/*" 2>&1 | tail -10
 }
 
-# Rsync model to worker node
+# Rsync model to all worker nodes (1 to N). Sequential, with progress per worker.
 rsync_model_to_worker() {
   local model="$1"
-  local worker_host="${WORKER_HOST}"
   local worker_user="${WORKER_USER:-$(whoami)}"
   local worker_hf_cache="${WORKER_HF_CACHE:-${HF_CACHE}}"
 
-  if [ -z "${worker_host}" ]; then
+  # Split WORKER_HOST into array (matches start_cluster.sh's array convention).
+  local -a worker_hosts=()
+  if [ -n "${WORKER_HOST:-}" ]; then
+    read -ra worker_hosts <<< "${WORKER_HOST}"
+  fi
+
+  if [ "${#worker_hosts[@]}" -eq 0 ]; then
     log "  No WORKER_HOST configured, skipping rsync"
     return 0
   fi
@@ -296,26 +452,31 @@ rsync_model_to_worker() {
     return 1
   fi
 
-  log "Syncing model to worker..."
-  log "  Worker: ${worker_user}@${worker_host}"
+  log "Syncing model to ${#worker_hosts[@]} worker(s)..."
   log "  Source: ${local_path}"
-  log "  Dest:   ${worker_hf_cache}/hub/"
+  log "  Dest:   ${worker_hf_cache}/hub/ on each worker"
 
-  # Ensure destination directory exists
-  ssh "${worker_user}@${worker_host}" "mkdir -p ${worker_hf_cache}/hub" 2>/dev/null || true
+  local rsync_failures=0
+  for i in "${!worker_hosts[@]}"; do
+    local host="${worker_hosts[i]}"
+    log "  [$((i+1))/${#worker_hosts[@]}] -> ${worker_user}@${host}"
+    ssh "${worker_user}@${host}" "mkdir -p ${worker_hf_cache}/hub" 2>/dev/null || true
+    if ! rsync -a --info=progress2 --human-readable \
+      --no-perms --no-owner --no-group \
+      --exclude='.locks' \
+      --exclude='*.lock' \
+      "${local_path}" \
+      "${worker_user}@${host}:${worker_hf_cache}/hub/"; then
+      log "  WARNING: rsync to ${host} failed"
+      rsync_failures=$((rsync_failures + 1))
+    fi
+  done
 
-  # Rsync with progress (exclude locks)
-  if ! rsync -a --info=progress2 --human-readable \
-    --no-perms --no-owner --no-group \
-    --exclude='.locks' \
-    --exclude='*.lock' \
-    "${local_path}" \
-    "${worker_user}@${worker_host}:${worker_hf_cache}/hub/"; then
-    log "  WARNING: rsync failed, but continuing..."
+  if [ "${rsync_failures}" -gt 0 ]; then
+    log "  ${rsync_failures} of ${#worker_hosts[@]} worker(s) failed - cluster may not start"
     return 1
   fi
-
-  log "  Model synced to worker"
+  log "  Model synced to all ${#worker_hosts[@]} worker(s)"
   return 0
 }
 
@@ -432,12 +593,12 @@ for i in "${!MODELS[@]}"; do
 done
 
 echo ""
-echo "  Multi-Node Models (TP=2, requires 2 DGX Spark nodes):"
+echo "  Multi-Spark Models (require 2+ DGX Spark nodes, TP scales with N):"
 for i in "${!MODELS[@]}"; do
-  if [ "${MODEL_NODES[$i]}" -eq 2 ]; then
-    MARKER=""
+  if [ "${MODEL_NODES[$i]}" -gt 1 ]; then
+    MARKER=" [needs ${MODEL_NODES[$i]} Sparks, TP=${MODEL_TP[$i]}]"
     if [ "${MODELS[$i]}" = "${CURRENT_MODEL}" ]; then
-      MARKER=" [CURRENT]"
+      MARKER=" [CURRENT]${MARKER}"
     fi
     if [ "${MODEL_NEEDS_TOKEN[$i]}" = "true" ]; then
       MARKER="${MARKER} [HF TOKEN]"
@@ -476,6 +637,8 @@ fi
 IDX=$((MODEL_NUMBER - 1))
 NEW_MODEL="${MODELS[$IDX]}"
 NEW_MODEL_NAME="${MODEL_NAMES[$IDX]}"
+NEW_QUANT="${MODEL_QUANT[$IDX]:-BF16}"
+NEW_IMAGE="${MODEL_IMAGE[$IDX]:-}"
 NEW_TP="${MODEL_TP[$IDX]}"
 NEW_NODES="${MODEL_NODES[$IDX]}"
 NEW_GPU_MEM="${MODEL_GPU_MEM[$IDX]}"
@@ -637,7 +800,14 @@ export TENSOR_PARALLEL="${NEW_TP}"
 export MAX_MODEL_LEN="${NEW_MAX_LEN}"
 export GPU_MEMORY_UTIL="${NEW_GPU_MEM}"
 export ENABLE_EXPERT_PARALLEL="${NEW_EXPERT_PARALLEL}"
+export TRUST_REMOTE_CODE="${NEW_TRUST}"
 export SKIP_MODEL_DOWNLOAD=1  # We already downloaded
+# Per-model image override (e.g. Gemma 4 needs vllm/vllm-openai:gemma4-cu130).
+# Empty string means use the default IMAGE from config.env.
+if [ -n "${NEW_IMAGE}" ]; then
+  export VLLM_IMAGE="${NEW_IMAGE}"
+  log "  Using model-specific image: ${VLLM_IMAGE}"
+fi
 
 if [ "${NEW_NODES}" -gt 1 ]; then
   echo "  Starting multi-node cluster (this may take 3-5 minutes)..."
