@@ -153,15 +153,22 @@ else
 fi
 echo ""
 
-# Confirmation
+# Confirmation - only prompt when running interactively. Non-interactive
+# invocations (scripts, ssh -c, pipelines) auto-confirm; the user has already
+# expressed intent by setting WORKER_HOST/etc. Use --force to suppress this
+# notice when running interactively.
 if [ "${FORCE}" != "true" ]; then
-  read -p "Proceed with shutdown? [y/N] " -n 1 -r
-  echo ""
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    log "Cancelled."
-    exit 0
+  if [ -t 0 ]; then
+    read -p "Proceed with shutdown? [y/N] " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+      log "Cancelled."
+      exit 0
+    fi
+    echo ""
+  else
+    log "Non-interactive shell - proceeding with shutdown (--force to suppress this notice)."
   fi
-  echo ""
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

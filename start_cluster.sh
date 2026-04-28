@@ -43,7 +43,6 @@ MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-2}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 GPU_MEMORY_UTIL="${GPU_MEMORY_UTIL:-0.90}"
-SWAP_SPACE="${SWAP_SPACE:-16}"
 SHM_SIZE="${SHM_SIZE:-16g}"
 
 # Auto-detect MoE models for expert parallelism
@@ -841,7 +840,8 @@ if [ -n "${WORKER_HOST}" ]; then
   WORKER_JOINED=false
   for i in {1..120}; do
     NODE_COUNT=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep -E '^ [0-9]+ node_' | wc -l" 2>/dev/null || echo "0")
-    CURRENT_GPUS=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep 'GPU:' | awk -F'/' '{print \$2}' | awk '{print \$1}'" 2>/dev/null || echo "1")
+    CURRENT_GPUS=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep -oE '[0-9.]+/[0-9.]+ GPU' | awk -F'/' '{print \$2}' | awk '{print int(\$1)}'" 2>/dev/null || echo "0")
+    [ -z "${CURRENT_GPUS}" ] && CURRENT_GPUS=0
 
     if [ "${NODE_COUNT}" -ge 2 ]; then
       echo ""
@@ -881,7 +881,8 @@ else
   docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | head -15" || true
 
   CURRENT_NODES=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep -E '^ [0-9]+ node' | awk '{print \$1}'" 2>/dev/null || echo "1")
-  CURRENT_GPUS=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep 'GPU:' | awk -F'/' '{print \$2}' | awk '{print \$1}'" 2>/dev/null || echo "1")
+  CURRENT_GPUS=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep -oE '[0-9.]+/[0-9.]+ GPU' | awk -F'/' '{print \$2}' | awk '{print int(\$1)}'" 2>/dev/null || echo "0")
+  [ -z "${CURRENT_GPUS}" ] && CURRENT_GPUS=0
 
   log ""
   log "  Current cluster: ${CURRENT_NODES} node(s), ${CURRENT_GPUS} GPU(s)"
@@ -893,7 +894,8 @@ else
     log "     (Press Ctrl+C to abort and add workers manually)"
 
     for i in {1..30}; do
-      CURRENT_GPUS=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep 'GPU:' | awk -F'/' '{print \$2}' | awk '{print \$1}'" 2>/dev/null || echo "1")
+      CURRENT_GPUS=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep -oE '[0-9.]+/[0-9.]+ GPU' | awk -F'/' '{print \$2}' | awk '{print int(\$1)}'" 2>/dev/null || echo "0")
+      [ -z "${CURRENT_GPUS}" ] && CURRENT_GPUS=0
       if [ "${CURRENT_GPUS:-1}" -ge "${TENSOR_PARALLEL}" ]; then
         log "  ✅ Sufficient GPUs available: ${CURRENT_GPUS}"
         break
@@ -918,7 +920,7 @@ log "Step ${VLLM_STEP}/${TOTAL_STEPS}: Starting vLLM server"
 log ""
 
 # Kill any existing vLLM processes
-docker exec "${NAME}" bash -lc "pkill -f 'vllm serve' 2>/dev/null || true" || true
+docker exec "${NAME}" bash -lc "pkill -f '/vllm serve' 2>/dev/null || true" || true
 
 log "  Starting vLLM in background (this launches the server process)..."
 
@@ -929,7 +931,6 @@ VLLM_ARGS="${VLLM_ARGS} --port ${VLLM_PORT}"
 VLLM_ARGS="${VLLM_ARGS} --tensor-parallel-size ${TENSOR_PARALLEL}"
 VLLM_ARGS="${VLLM_ARGS} --max-model-len ${MAX_MODEL_LEN}"
 VLLM_ARGS="${VLLM_ARGS} --gpu-memory-utilization ${GPU_MEMORY_UTIL}"
-VLLM_ARGS="${VLLM_ARGS} --swap-space ${SWAP_SPACE}"
 VLLM_ARGS="${VLLM_ARGS} --download-dir /root/.cache/huggingface"
 VLLM_ARGS="${VLLM_ARGS} --load-format ${LOAD_FORMAT}"
 
@@ -956,6 +957,7 @@ docker exec "${NAME}" bash -lc "
   export VLLM_MXFP4_USE_MARLIN=1
 
   nohup vllm serve ${MODEL} ${VLLM_ARGS} > /var/log/vllm.log 2>&1 &
+  echo \$! > /var/run/vllm.pid
 
   sleep 1
 " || true
@@ -1002,9 +1004,12 @@ for i in $(seq 1 $MAX_WAIT); do
   fi
 
   # Check vLLM process status and extract progress from logs
-  VLLM_PID=$(docker exec "${NAME}" bash -lc "pgrep -f 'vllm serve' 2>/dev/null" || echo "")
+  # Check the vLLM process via the pidfile written at launch.
+  # We can't use `pgrep -f 'vllm serve'` here because bash -lc's own argv
+  # contains the pattern, so pgrep self-matches.
+  VLLM_PID=$(docker exec "${NAME}" cat /var/run/vllm.pid 2>/dev/null || echo "")
 
-  if [ -z "${VLLM_PID}" ]; then
+  if [ -z "${VLLM_PID}" ] || ! docker exec "${NAME}" kill -0 "${VLLM_PID}" 2>/dev/null; then
     # vLLM process died - check logs for error
     echo ""
     log ""
