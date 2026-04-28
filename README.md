@@ -10,14 +10,14 @@ Deploy [vLLM](https://github.com/vllm-project/vllm) on NVIDIA DGX Spark systems 
 
 ## Features
 
-- **Single-node and multi-node support** - Run on one DGX Spark or scale to two
-- **Zero-config single-node** - No InfiniBand setup required for single-node deployments
-- **Single-command deployment** - Start entire cluster from head node via SSH
-- **Auto-detection** of InfiniBand IPs, network interfaces, and HCA devices (multi-node)
-- **Generic scripts** that work on any DGX Spark configuration
-- **13 model presets** including Llama, Qwen, Mixtral, Gemma
-- **InfiniBand RDMA** for high-speed inter-node communication (200Gb/s)
+- **1-to-N Spark support** - Single Spark, two Sparks (stacked / direct cable), or 3+ Sparks (switched fabric). `WORKER_HOST` and `WORKER_IB_IP` are space-separated lists; `TENSOR_PARALLEL` defaults to `1 + N` workers.
+- **Zero-config single-node** - No InfiniBand setup required for single-Spark deployments
+- **Single-command deployment** - Start the entire cluster from the head Spark via SSH
+- **Auto-detection** of InfiniBand IPs, network interfaces, and HCA devices (multi-Spark)
+- **41 model presets** - 16 community-tested + 25 from NVIDIA's official Spark vLLM matrix (FP8, NVFP4, MXFP4, BF16 quants)
+- **InfiniBand RDMA** for high-speed inter-Spark communication (200Gb/s)
 - **Comprehensive benchmarking** with multiple test profiles
+- **Offline mode** - `SKIP_MODEL_DOWNLOAD=1` for air-gapped Sparks with a pre-staged HF cache
 
 ## Cluster Architecture
 
@@ -40,41 +40,50 @@ Deploy [vLLM](https://github.com/vllm-project/vllm) on NVIDIA DGX Spark systems 
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Dual-Node Mode (2x DGX Spark)
+### Multi-Spark Mode (1 head + N workers)
+
+The same scripts handle 2 Sparks (directly cabled QSFP) and 3+ Sparks (switched fabric). `TENSOR_PARALLEL` defaults to `1 + N` (one GPU per Spark) but can be overridden.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    DGX Spark 2-Node Cluster                     │
-│                                                                 │
-│  ┌──────────────────────┐      ┌──────────────────────┐        │
-│  │     HEAD NODE        │      │    WORKER NODE       │        │
-│  │    (Ray head)        │ SSH  │    (Ray worker)      │        │
-│  │                      │─────►│                      │        │
-│  │  GPU: 1x GB10        │◄────►│  GPU: 1x GB10        │        │
-│  │  (Blackwell, sm100)  │ IB   │  (Blackwell, sm100)  │        │
-│  │                      │200Gb │                      │        │
-│  │  /raid/hf-cache      │      │  /raid/hf-cache      │        │
-│  │  Port: 8000 (API)    │      │                      │        │
-│  └──────────────────────┘      └──────────────────────┘        │
-│                                                                 │
-│  Tensor Parallel (TP=2): Model split across both GPUs          │
-│  Best for: Models that exceed a single Spark's ~120GB VRAM     │
-└─────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│            DGX Spark Cluster (1 Head + N Workers)                  │
+│                                                                    │
+│  ┌──────────────────────┐  ┌──────────────────────┐  ┌─────────┐  │
+│  │     HEAD NODE        │  │   WORKER NODE 1      │  │  ...    │  │
+│  │    (Ray head)        │  │   (Ray worker)       │  │ Worker  │  │
+│  │                      │  │                      │  │   N     │  │
+│  │  GPU: 1x GB10        │◄►│  GPU: 1x GB10        │◄►│         │  │
+│  │  (Blackwell, sm100)  │IB│  (Blackwell, sm100)  │IB│         │  │
+│  │                      │  │                      │  │         │  │
+│  │  /raid/hf-cache      │  │  /raid/hf-cache      │  │  ...    │  │
+│  │  Port: 8000 (API)    │  │                      │  │         │  │
+│  └──────────────────────┘  └──────────────────────┘  └─────────┘  │
+│           ▲                          ▲                    ▲        │
+│           └──────────────────────────┴────────────────────┘        │
+│         200Gb/s QSFP - direct cable (2 Sparks) or switch (3+)      │
+│                                                                    │
+│  Tensor Parallel (TP=N+1): Model split across all GPUs             │
+│  Default TP: 1 + WORKER_COUNT (override via TENSOR_PARALLEL=...)   │
+└────────────────────────────────────────────────────────────────────┘
 ```
+
+NVIDIA documents three reference topologies — see their official playbook at <https://build.nvidia.com/spark/vllm/instructions> (single Spark, stacked / direct-cable 2 Sparks, switched 3+ Sparks). Our scripts cover all three with the same code path.
 
 ## Hardware Requirements
 
-### Single-Node
+### Single-Spark
 - **Nodes:** 1x DGX Spark system
-- **GPUs:** 1x NVIDIA GB10 (Grace Blackwell, sm100), ~120GB VRAM
+- **GPUs:** 1x NVIDIA GB10 (Grace Blackwell, sm100), ~120GB unified memory
 - **Storage:** Model cache at `/raid/hf-cache` (or configure in `config.env`)
 
-### Dual-Node (for larger models)
-- **Nodes:** 2x DGX Spark systems
-- **GPUs:** 1x NVIDIA GB10 per node, ~120GB VRAM each
-- **Network:** 200Gb/s InfiniBand RoCE between nodes
-- **Storage:** Model cache at `/raid/hf-cache` on both nodes
-- **SSH:** Passwordless SSH from head to worker node
+### Multi-Spark (2+ Sparks for larger models)
+- **Nodes:** 2 or more DGX Spark systems
+- **GPUs:** 1x NVIDIA GB10 per node, ~120GB unified memory each
+- **Network:**
+  - **2 Sparks**: 200Gb/s QSFP direct cable (no switch needed)
+  - **3+ Sparks**: 200Gb/s QSFP through a switch
+- **Storage:** Model cache at `/raid/hf-cache` on every Spark (use `${WORKER_HF_CACHE}` to override on workers)
+- **SSH:** Passwordless SSH from head to every worker
 
 ## Prerequisites
 
@@ -212,10 +221,16 @@ source ./setup-env.sh
 cp config.env config.local.env
 vim config.local.env
 
-# Set at minimum:
-# WORKER_HOST="<worker-ethernet-ip>"   # For SSH
-# WORKER_IB_IP="<worker-infiniband-ip>" # For NCCL
+# Two Sparks (head + 1 worker):
+# WORKER_HOST="<worker1-ethernet-ip>"
+# WORKER_IB_IP="<worker1-infiniband-ip>"
 # WORKER_USER="<ssh-username>"
+#
+# 3+ Sparks (head + N workers; lists are space-separated, 1:1 positional):
+# WORKER_HOST="<w1-eth> <w2-eth> <w3-eth>"
+# WORKER_IB_IP="<w1-ib> <w2-ib> <w3-ib>"
+# WORKER_USER="<ssh-username>"
+# # TENSOR_PARALLEL defaults to 1 + N - override only if needed
 ```
 
 **Start the Cluster:**
@@ -224,11 +239,25 @@ vim config.local.env
 ```
 
 This will:
-1. Pull the Docker image on both nodes
-2. Download the model (with rsync to worker)
-3. SSH to worker and start Ray worker container
+1. Pull the Docker image on the head node (workers pull theirs on first launch)
+2. Download the model on the head and rsync to each worker
+3. SSH to every worker and start its Ray worker container
 4. Start Ray head and vLLM server
-5. Wait for the cluster to become ready (~2-5 minutes)
+5. Wait for all `1 + N` Sparks to join the Ray cluster (~2-5 minutes for 2 Sparks; +60s budget per additional worker)
+
+#### Option C: 3+ Spark Cluster (NVIDIA's switched-fabric topology)
+
+Same as Option B, just longer lists in `WORKER_HOST` and `WORKER_IB_IP`. Example for a 4-Spark cluster running NVIDIA's MiniMax-M2.5 TP=4 example:
+
+```bash
+export WORKER_HOST="192.168.7.111 192.168.7.112 192.168.7.113"
+export WORKER_IB_IP="169.254.216.8 169.254.216.9 169.254.216.10"
+export WORKER_USER="rispark"
+# TENSOR_PARALLEL defaults to 4 (= 1 + 3 workers); override only if needed
+./switch_model.sh   # pick "MiniMax-M2.5" entry
+```
+
+The same `start_cluster.sh` handles 2 Sparks (direct QSFP cable) and 3+ Sparks (switched fabric); all you change is the length of the lists.
 
 ### 5. Verify the Cluster
 
@@ -375,29 +404,32 @@ Use `switch_model.sh` to easily switch between models:
 
 ## Supported Models
 
-Models can run on single-node (TP=1) or dual-node (TP=2) depending on size.
+The cluster ships with **41 model presets** in `switch_model.sh`. They split into two groups:
 
-| # | Model | Size | Single-Node | Notes |
-|---|-------|------|-------------|-------|
-| 1 | `openai/gpt-oss-120b` | ~65GB | Yes | Default, MoE, native MXFP4 |
-| 2 | `openai/gpt-oss-20b` | ~16-20GB | Yes | MoE, fast |
-| 3 | `Qwen/Qwen2.5-7B-Instruct` | ~7GB | Yes | Very fast |
-| 4 | `Qwen/Qwen2.5-14B-Instruct` | ~14GB | Yes | Fast |
-| 5 | `Qwen/Qwen2.5-32B-Instruct` | ~30GB | Yes | Strong mid-size |
-| 6 | `Qwen/Qwen2.5-72B-Instruct` | ~70GB | Yes | High quality |
-| 7 | `mistralai/Mistral-7B-Instruct-v0.3` | ~7GB | Yes | Very fast |
-| 8 | `mistralai/Mistral-Nemo-Instruct-2407` | ~12GB | Yes | 128k context |
-| 9 | `mistralai/Mixtral-8x7B-Instruct-v0.1` | ~45GB | Yes | MoE, fast |
-| 10 | `meta-llama/Llama-3.1-8B-Instruct` | ~8GB | Yes | Very fast (needs HF token) |
-| 11 | `meta-llama/Llama-3.1-70B-Instruct` | ~65GB | Yes | High quality (needs HF token) |
-| 12 | `microsoft/phi-4` | ~14-16GB | Yes | Small but smart |
-| 13 | `google/gemma-2-27b-it` | ~24-28GB | Yes | Strong mid-size (needs HF token) |
-| 14 | `CohereForAI/c4ai-command-r-plus-08-2024` | ~208GB | No | BF16, 104B, requires 2 Sparks (needs HF token) |
-| 15 | `nvidia/Llama-3.1-405B-Instruct-FP4` | ~200GB | No | FP4 quantized 405B, requires 2 Sparks (needs HF token) |
-| 16 | `meta-llama/Llama-3.3-70B-Instruct` | ~141GB | No | BF16, requires 2 Sparks (needs HF token) |
+- **`[NVIDIA]`** — 25 entries from NVIDIA's official Spark vLLM matrix at <https://build.nvidia.com/spark/vllm/instructions>. Most are FP8 / NVFP4 quantized variants from `nvidia/...` that take maximum advantage of Spark's unified memory.
+- **`[community]`** — 16 entries that work but are not on NVIDIA's verified matrix (Mistral family, Qwen2.5 base, Gemma 2, Command-R-Plus, etc.). Kept for backwards compatibility.
 
-**Single-Node:** Models up to ~100GB fit on one DGX Spark (~120GB VRAM), including GPT-OSS 120B in its native MXFP4 format
-**Dual-Node:** Required for models that exceed a single Spark's VRAM — combined ~240GB across two Sparks supports models up to ~200GB (e.g., Command-R-Plus, FP4-quantized Llama 405B, BF16 Llama 3.3 70B)
+Run `./switch_model.sh` for the full menu (it groups by Single-Spark vs Multi-Spark and shows quant labels, gating, and cache status). Some highlights:
+
+| Family | Variant | Quant | Sparks | TP |
+|---|---|---|---|---|
+| `nvidia/Llama-3.1-8B-Instruct-{FP8,NVFP4}` | 8B | FP8 / NVFP4 | 1 | 1 |
+| `nvidia/Llama-3.3-70B-Instruct-NVFP4` | 70B | NVFP4 | 1 | 1 |
+| `nvidia/Qwen3-{8B,14B,32B}-{FP8,NVFP4}` | 8-32B | FP8 / NVFP4 | 1 | 1 |
+| `nvidia/Phi-4-multimodal-instruct-{FP8,NVFP4}` | multimodal | FP8 / NVFP4 | 1 | 1 |
+| `nvidia/Phi-4-reasoning-plus-{FP8,NVFP4}` | reasoning | FP8 / NVFP4 | 1 | 1 |
+| `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-{BF16,FP8}` | 30B MoE | BF16 / FP8 | 1 | 1 |
+| `google/gemma-4-{E2B,E4B,26B-A4B,31B}-it` | base | BF16 | 1 | 1 |
+| `nvidia/Gemma-4-31B-IT-NVFP4` | 31B | NVFP4 | 1 | 1 |
+| `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` | 120B MoE | NVFP4 | 2 | 2 |
+| `MiniMaxAI/MiniMax-M2.5` | MoE | base | 4 | 4 |
+| `openai/gpt-oss-{20b,120b}` | 20B / 120B MoE | MXFP4 | 1 | 1 |
+| `meta-llama/Llama-3.3-70B-Instruct` | 70B | BF16 | 2 | 2 |
+
+> **Gemma 4** uses a separate vLLM image (`vllm/vllm-openai:gemma4-cu130`); `switch_model.sh` sets `VLLM_IMAGE` automatically when you pick a Gemma 4 entry.
+> **Phi-4-multimodal-instruct** and **MiniMax-M2.5** require `--trust-remote-code` (handled automatically — `switch_model.sh` exports `TRUST_REMOTE_CODE=true` for those entries).
+>
+> Spark's 120GB unified memory is shared between CPU and GPU; quantized variants (FP8 / NVFP4 / MXFP4) typically give the best throughput at usable batch sizes.
 
 ## Benchmark Profiles
 
@@ -578,6 +610,33 @@ echo $HF_TOKEN
 ./switch_model.sh -r <model-number>
 ```
 
+### Unified-Memory Pressure (UMA buffer-cache flush)
+
+DGX Spark uses a Unified Memory Architecture (UMA) where CPU and GPU share the same physical DRAM. Linux's page cache can hold onto memory that vLLM/CUDA can't reclaim, leading to apparent OOM well within capacity. NVIDIA recommends flushing the buffer cache when this happens:
+
+```bash
+sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+```
+
+Run this on every Spark before launching a large model if you've recently been working with big files.
+
+### NCCL: IB Verbs vs TCP-on-QSFP
+
+Our multi-Spark scripts enable RDMA verbs (`NCCL_IB_HCA`, `NCCL_NET_GDR_LEVEL=5`) for best throughput. NVIDIA's official Spark playbook only sets `NCCL_SOCKET_IFNAME` and routes NCCL over TCP on the same QSFP interface — slower in theory but more compatible.
+
+If you hit NCCL hangs during model load on a multi-Spark setup, the fast workaround is to fall back to NVIDIA's TCP path:
+
+```bash
+export NCCL_IB_DISABLE=1
+./start_cluster.sh
+```
+
+That forces NCCL to use sockets only and matches the official playbook exactly.
+
+### Silent vLLM crashes (used to look like "Loading...")
+
+Older versions of `start_cluster.sh` used `pgrep -f 'vllm serve'` to check whether vLLM was alive during startup. Because the pattern lived in the wrapping shell's argv, pgrep self-matched and our death-detection never fired — a real vLLM crash looked identical to a slow legitimate load until the 30-min timeout. Fixed in commit `462aad5` by writing a pidfile at launch and using `kill -0` instead. If you're on an older revision and seeing 30-min "Loading..." spinners, pull latest.
+
 ## System Diagnostics
 
 Use `checkout_setup.sh` for comprehensive system checks:
@@ -603,7 +662,7 @@ Use `checkout_setup.sh` for comprehensive system checks:
 
 ### Expected Performance (GPT-OSS 120B)
 
-Performance will vary based on single-node vs dual-node deployment, context length, and concurrency. The numbers below are rough guidance from dual-node runs:
+Performance will vary based on Spark count, model quantization, context length, and concurrency. The numbers below are rough guidance from 2-Spark runs:
 
 | Metric | Value |
 |--------|-------|
@@ -613,10 +672,11 @@ Performance will vary based on single-node vs dual-node deployment, context leng
 
 ### Optimization Tips
 
-1. **Use InfiniBand IPs** - Ensure WORKER_IPS uses the 169.254.x.x InfiniBand addresses
-2. **Memory Utilization** - Set to 0.90 for max KV cache, reduce if OOM
-3. **Expert Parallel** - Enable for MoE models (gpt-oss, Mixtral)
-4. **Pre-download Models** - Use `switch_model.sh -d` to avoid download delays
+1. **Use InfiniBand IPs** - Ensure `WORKER_IB_IP` uses 169.254.x.x InfiniBand addresses (not the slower Ethernet IPs)
+2. **Memory Utilization** - Set `GPU_MEMORY_UTIL=0.90` for max KV cache, reduce if OOM
+3. **Expert Parallel** - Enable for MoE models (gpt-oss, Mixtral, Nemotron-3-Nano-A3B, MiniMax). Auto-detected from the model name pattern in `start_cluster.sh`; per-model presets in `switch_model.sh` set it explicitly.
+4. **Pre-download Models** - Use `switch_model.sh -d` to avoid first-launch download delays
+5. **Quantized variants** - On Spark, NVFP4 / FP8 / MXFP4 generally beat BF16 at usable batch sizes since they free more unified memory for the KV cache
 
 ## File Structure
 
@@ -637,12 +697,29 @@ vllm-dgx-spark/
 └── benchmark_results/     # Benchmark output directory
 ```
 
+## How this repo relates to vLLM's `run_cluster.sh`
+
+NVIDIA's official Spark playbook uses vLLM's upstream helper script `run_cluster.sh` (from `vllm-project/vllm/examples/online_serving`) which boils a multi-node Ray + Docker setup down to ~50 lines. That's the minimal path — no diagnostics, no model presets, no IB tuning, no auto-detection. You set `MN_IF_NAME` and `HEAD_NODE_IP` by hand and run the same command on every box.
+
+This repo is a **superset**:
+
+- Single-command orchestration from the head Spark (no need to SSH to every worker manually)
+- Auto-detects InfiniBand HCAs and IPs via `ibdev2netdev`
+- 41 model presets with per-model TP / max_model_len / quant / image / trust-remote-code defaults
+- Multi-Spark (1-N workers) with array `WORKER_HOST` / `WORKER_IB_IP`
+- Rich diagnostics (`checkout_setup.sh`) for SSH, RDMA, NCCL transport, port conflicts, GPU topology
+- Offline-mode support (`SKIP_MODEL_DOWNLOAD=1`) for air-gapped Sparks
+- Benchmark harness (single-request, quick, full) and per-model results
+
+If you only need the minimal upstream path, the official NVIDIA pages and `run_cluster.sh` are linked below.
+
 ## References
 
 - [vLLM Documentation](https://docs.vllm.ai/)
 - [vLLM GitHub](https://github.com/vllm-project/vllm)
+- [vLLM `run_cluster.sh`](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/run_cluster.sh) — minimal multi-node helper used by NVIDIA's playbook
 - [NVIDIA vLLM Container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/vllm)
-- [NVIDIA DGX Spark vLLM Playbook](https://build.nvidia.com/spark/vllm/stacked-sparks)
+- [NVIDIA DGX Spark vLLM Playbook](https://build.nvidia.com/spark/vllm/instructions) (single Spark / stacked / switched / troubleshooting tabs)
 - [NVIDIA NCCL over InfiniBand](https://build.nvidia.com/spark/nccl/stacked-sparks)
 
 ## License
