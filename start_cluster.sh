@@ -18,11 +18,11 @@ elif [ -f "${SCRIPT_DIR}/config.env" ]; then
 fi
 
 # Configuration (can be overridden by config.env or environment)
-IMAGE="${VLLM_IMAGE:-${IMAGE:-nvcr.io/nvidia/vllm:26.03-py3}}"
+IMAGE="${VLLM_IMAGE:-${IMAGE:-nvcr.io/nvidia/vllm:26.04-py3}}"
 NAME="${HEAD_CONTAINER_NAME:-${NAME:-ray-head}}"
 HF_CACHE="${HF_CACHE:-/raid/hf-cache}"
 HF_TOKEN="${HF_TOKEN:-}"
-RAY_VERSION="${RAY_VERSION:-2.54.0}"
+RAY_VERSION="${RAY_VERSION:-2.55.1}"
 # Offline mode: skip the HF download step and run vLLM/HF in offline mode.
 # Set SKIP_MODEL_DOWNLOAD=1 when the HF cache is already populated (air-gapped
 # Spark, or model copied from another machine). The script will verify the
@@ -619,7 +619,7 @@ log "Step 5/${TOTAL_STEPS}: Verifying container dependencies"
 # Verify vLLM is available with CUDA
 CUDA_AVAILABLE=$(docker exec "${NAME}" python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
 if [ "${CUDA_AVAILABLE}" != "True" ]; then
-  error "PyTorch CUDA not available - container may be corrupted. Try: docker pull nvcr.io/nvidia/vllm:26.03-py3"
+  error "PyTorch CUDA not available - container may be corrupted. Try: docker pull nvcr.io/nvidia/vllm:26.04-py3"
 fi
 log "  ✅ PyTorch CUDA available"
 
@@ -629,10 +629,18 @@ if [ "${INSTALLED_VLLM_VERSION}" == "unknown" ]; then
 fi
 log "  ✅ vLLM ${INSTALLED_VLLM_VERSION} available"
 
+# Install Ray if missing (26.04 container does not ship Ray)
+if ! docker exec "${NAME}" python3 -c "import ray" 2>/dev/null; then
+  log "  Installing Ray ${RAY_VERSION} (not bundled in container)..."
+  if ! docker exec "${NAME}" pip install --quiet "ray[default]==${RAY_VERSION}" 2>&1 | tail -3; then
+    error "Failed to install Ray ${RAY_VERSION}"
+  fi
+fi
+
 # Verify Ray version
 INSTALLED_RAY_VERSION=$(docker exec "${NAME}" python3 -c "import ray; print(ray.__version__)" 2>/dev/null || echo "unknown")
 if [ "${INSTALLED_RAY_VERSION}" == "unknown" ]; then
-  error "Ray not found in container"
+  error "Ray not found in container after install"
 fi
 log "  ✅ Ray ${INSTALLED_RAY_VERSION} available"
 

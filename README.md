@@ -4,7 +4,9 @@ Deploy [vLLM](https://github.com/vllm-project/vllm) on NVIDIA DGX Spark systems 
 
 > **DISCLAIMER**: This project is NOT affiliated with, endorsed by, or officially supported by NVIDIA, vLLM, or any other organization. This is a community-driven effort to run vLLM on DGX Spark hardware. Use at your own risk. The software is provided "AS IS", without warranty of any kind.
 
-> **Upgraded (2026-04-09)**: Components bumped to `nvcr.io/nvidia/vllm:26.03-py3` (vLLM 0.17.1) with Ray 2.54.0. Verified end-to-end on both single-node and multi-node TP=2 across two DGX Spark systems. `RAY_PORT` moved from 6380 to 6385 to avoid collisions with common redis host-port mappings.
+> **Upgraded (2026-04-28)**: Components bumped to `nvcr.io/nvidia/vllm:26.04-py3` (vLLM 0.19.0, PyTorch 2.12.0a0, CUDA 13.2.1) with Ray 2.55.1. The 26.04 container no longer ships Ray, so `start_cluster.sh` and `start_worker_vllm.sh` now `pip install ray[default]==${RAY_VERSION}` into the head and worker containers at startup (~30s). Smoke tested on a single Spark; multi-node TP=2 verification pending.
+>
+> Previous (2026-04-09): `nvcr.io/nvidia/vllm:26.03-py3` (vLLM 0.17.1) with Ray 2.54.0.
 
 ## Features
 
@@ -309,7 +311,7 @@ TRUST_REMOTE_CODE="false"          # For custom model code
 # │ Optional                                                        │
 # └─────────────────────────────────────────────────────────────────┘
 HF_TOKEN="hf_xxx"                  # For gated models (Llama, etc.)
-VLLM_IMAGE="nvcr.io/nvidia/vllm:26.03-py3"  # Docker image
+VLLM_IMAGE="nvcr.io/nvidia/vllm:26.04-py3"  # Docker image
 ```
 
 ### Single-Node vs Multi-Node Mode Detection

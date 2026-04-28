@@ -10,8 +10,8 @@ set -euo pipefail
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Configuration
-IMAGE="${IMAGE:-nvcr.io/nvidia/vllm:26.03-py3}"
-RAY_VERSION="${RAY_VERSION:-2.54.0}"
+IMAGE="${IMAGE:-nvcr.io/nvidia/vllm:26.04-py3}"
+RAY_VERSION="${RAY_VERSION:-2.55.1}"
 RAY_PORT="${RAY_PORT:-6385}"
 HF_CACHE="${HF_CACHE:-/raid/hf-cache}"
 HF_TOKEN="${HF_TOKEN:-}"  # Set via: export HF_TOKEN=hf_xxx
@@ -277,7 +277,7 @@ log "Step 6/8: Verifying container dependencies"
 # Verify vLLM is available with CUDA
 CUDA_AVAILABLE=$(docker exec "${WORKER_NAME}" python3 -c "import torch; print(torch.cuda.is_available())" 2>/dev/null || echo "False")
 if [ "${CUDA_AVAILABLE}" != "True" ]; then
-  error "PyTorch CUDA not available - container may be corrupted. Try: docker pull nvcr.io/nvidia/vllm:26.03-py3"
+  error "PyTorch CUDA not available - container may be corrupted. Try: docker pull nvcr.io/nvidia/vllm:26.04-py3"
 fi
 log "  ✅ PyTorch CUDA available"
 
@@ -287,10 +287,18 @@ if [ "${INSTALLED_VLLM_VERSION}" == "unknown" ]; then
 fi
 log "  ✅ vLLM ${INSTALLED_VLLM_VERSION} available"
 
+# Install Ray if missing (26.04 container does not ship Ray)
+if ! docker exec "${WORKER_NAME}" python3 -c "import ray" 2>/dev/null; then
+  log "  Installing Ray ${RAY_VERSION} (not bundled in container)..."
+  if ! docker exec "${WORKER_NAME}" pip install --quiet "ray[default]==${RAY_VERSION}" 2>&1 | tail -3; then
+    error "Failed to install Ray ${RAY_VERSION}"
+  fi
+fi
+
 # Verify Ray version
 INSTALLED_RAY_VERSION=$(docker exec "${WORKER_NAME}" python3 -c "import ray; print(ray.__version__)" 2>/dev/null || echo "unknown")
 if [ "${INSTALLED_RAY_VERSION}" == "unknown" ]; then
-  error "Ray not found in container"
+  error "Ray not found in container after install"
 fi
 log "  ✅ Ray ${INSTALLED_RAY_VERSION} available"
 
