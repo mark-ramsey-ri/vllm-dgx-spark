@@ -1,6 +1,9 @@
 # Local configuration (contains secrets like HF_TOKEN, IPs)
 config.local.env
 
+# Local planning notes (not for upstream)
+upgrade-vllm.md
+
 # Benchmark results (may contain system-specific data)
 benchmark_results/
 
