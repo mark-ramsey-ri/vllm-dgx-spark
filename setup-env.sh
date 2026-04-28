@@ -4,24 +4,34 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
 # With auto-detection enabled in the scripts, you only need to set:
-# - HF_TOKEN (for gated models like Llama)
-# - WORKER_HOST (worker's Ethernet IP for SSH/rsync from head node)
+# - HF_TOKEN (for gated models like Llama, Gemma)
+# - WORKER_HOST (space-separated list of worker SSH IPs; supports 1-N workers)
+# - WORKER_IB_IP (space-separated list of worker NCCL IPs; optional, 1:1 with WORKER_HOST)
 #
 # For manual worker setup (not orchestrated from head):
 # - HEAD_IP (head node's InfiniBand IP)
 #
 # Usage:
-#   source ./setup-env.sh           # Interactive mode
-#   source ./setup-env.sh --head    # Head node mode
-#   source ./setup-env.sh --worker  # Worker node mode (manual setup only)
+#   source ./setup-env.sh             # Interactive mode (sets env vars)
+#   source ./setup-env.sh --head      # Head node mode
+#   source ./setup-env.sh --worker    # Worker node mode (manual setup only)
+#   ./setup-env.sh --discover         # Multi-Spark mDNS discovery + SSH key push
+#                                     #   (wraps NVIDIA's discover-sparks script;
+#                                     #    no need to source - it's a one-shot)
 #
-# NOTE: This script must be sourced (not executed) to set environment variables
+# NOTE: For interactive/head/worker modes, source this script (not execute) so
+# the environment variables propagate to your shell. The --discover mode is a
+# one-shot helper and can be run normally.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Check if script is being sourced
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Check if script is being sourced. The --discover mode is a one-shot helper
+# (just runs NVIDIA's discover-sparks script and exits) so it's fine to execute
+# directly; the other modes need to be sourced so env vars propagate.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]] && [[ "$1" != "--discover" ]]; then
     echo "❌ Error: This script must be sourced, not executed"
-    echo "   Usage: source ./setup-env.sh"
+    echo "   Usage:"
+    echo "     source ./setup-env.sh                   # interactive / head / worker"
+    echo "     ./setup-env.sh --discover               # mDNS discovery (one-shot)"
     exit 1
 fi
 
@@ -99,6 +109,61 @@ elif [[ "$1" == "--worker" ]]; then
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}WORKER NODE CONFIGURATION${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+elif [[ "$1" == "--discover" ]]; then
+    # Multi-Spark mDNS discovery + bidirectional SSH key push.
+    # Wraps NVIDIA's discover-sparks script (from the official Spark playbooks
+    # repo). It scans the local network for dgx-spark-*.local hostnames,
+    # prompts once for each Spark's password, and sets up bidirectional SSH.
+    DISCOVER_URL="https://raw.githubusercontent.com/NVIDIA/dgx-spark-playbooks/refs/heads/main/nvidia/connect-two-sparks/assets/discover-sparks"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}Multi-Spark Discovery (NVIDIA discover-sparks wrapper)${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "This will:"
+    echo "  1. Download NVIDIA's discover-sparks script to a temp file"
+    echo "  2. Run it - the script will prompt you for each Spark's password"
+    echo "  3. After completion, you'll have bidirectional passwordless SSH set up"
+    echo ""
+    echo "Source: ${DISCOVER_URL}"
+    echo ""
+    echo "Prerequisites: every Spark must already have:"
+    echo "  - The same username configured (see README section 3a)"
+    echo "  - CX7 IPs assigned via netplan (see README section 3c)"
+    echo "  - Avahi/mDNS running (default on the DGX Spark base image)"
+    echo ""
+    read -p "Proceed? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo "Cancelled."
+        return 0 2>/dev/null || exit 0
+    fi
+    DISCOVER_TMP="$(mktemp -t discover-sparks.XXXXXX)"
+    if ! curl -fsSL "${DISCOVER_URL}" -o "${DISCOVER_TMP}"; then
+        echo -e "${RED}✗ Failed to download discover-sparks from ${DISCOVER_URL}${NC}"
+        echo "  Falling back to manual instructions:"
+        echo "    ssh-copy-id -i ~/.ssh/id_ed25519.pub <user>@<worker-IP>   # repeat per worker"
+        rm -f "${DISCOVER_TMP}"
+        return 1 2>/dev/null || exit 1
+    fi
+    echo ""
+    echo "Running discover-sparks..."
+    echo ""
+    bash "${DISCOVER_TMP}"
+    DISCOVER_RC=$?
+    rm -f "${DISCOVER_TMP}"
+    echo ""
+    if [ "${DISCOVER_RC}" -eq 0 ]; then
+        echo -e "${GREEN}✓ Discovery complete.${NC}"
+        echo ""
+        echo "Next: re-run setup-env.sh interactively (no --discover flag) to capture"
+        echo "the discovered IPs into WORKER_HOST and WORKER_IB_IP. For 3+ Sparks,"
+        echo "those vars take space-separated lists, e.g.:"
+        echo "    WORKER_HOST=\"192.168.7.111 192.168.7.112 192.168.7.113\""
+        echo "    WORKER_IB_IP=\"169.254.216.8 169.254.216.9 169.254.216.10\""
+    else
+        echo -e "${RED}✗ discover-sparks exited with code ${DISCOVER_RC}.${NC}"
+        echo "  See README section 3e for manual ssh-copy-id instructions."
+    fi
+    return 0 2>/dev/null || exit 0
 else
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}vLLM DGX Spark - Environment Setup${NC}"
@@ -176,62 +241,71 @@ if [[ "$NODE_TYPE" == "head" ]] || [[ "$NODE_TYPE" == "interactive" ]]; then
     prompt_input "HF_TOKEN" "Enter your HuggingFace token" "" true
     echo ""
 
-    # Worker node Ethernet IP (required for orchestrated setup)
-    echo "Worker Node IP (required for multi-node setup):"
-    echo "  This is the worker's standard Ethernet IP for SSH/rsync"
-    echo "  Example: 192.168.7.111"
-    prompt_input "WORKER_HOST" "Enter worker node Ethernet IP" ""
+    # Worker node IPs (required for orchestrated multi-Spark setup).
+    # WORKER_HOST is space-separated; supports 1-N workers.
+    echo "Worker IP(s) for SSH/rsync (multi-Spark only - skip for single-Spark):"
+    echo "  1 worker:  192.168.7.111"
+    echo "  3 workers: 192.168.7.111 192.168.7.112 192.168.7.113"
+    echo "  (For first-time setup across N Sparks, run './setup-env.sh --discover'"
+    echo "   to auto-discover via mDNS and push SSH keys.)"
+    prompt_input "WORKER_HOST" "Enter worker IP(s), space-separated" ""
     echo ""
 
+    # Worker InfiniBand IPs (used by NCCL; 1:1 positional with WORKER_HOST).
+    # Empty is fine - cluster will use the SSH IPs for NCCL too.
+    if [ -n "${WORKER_HOST}" ]; then
+        echo "Worker InfiniBand IP(s) for NCCL (optional, 1:1 with WORKER_HOST):"
+        echo "  1 worker:  169.254.216.8"
+        echo "  3 workers: 169.254.216.8 169.254.216.9 169.254.216.10"
+        echo "  Leave blank to use the SSH IPs above for NCCL too."
+        prompt_input "WORKER_IB_IP" "Enter IB IP(s), space-separated (or blank)" ""
+        echo ""
+    fi
+
     # Worker node username (if different from current user)
-    echo "Worker Node Username (if different from current user):"
+    echo "Worker Node Username (must be the same on every Spark):"
     echo "  Leave blank to use current username: $(whoami)"
     prompt_input "WORKER_USER" "Enter worker node username" "$(whoami)"
     echo ""
 
+    # Compute a sensible TENSOR_PARALLEL default from WORKER_HOST cardinality.
+    read -ra _WHOSTS <<< "${WORKER_HOST:-}"
+    DEFAULT_TP=$((${#_WHOSTS[@]} + 1))
+
     # Optional model configuration
     echo -e "${BLUE}Optional Configuration (press Enter to use defaults):${NC}"
     prompt_input "MODEL" "Model to serve" "openai/gpt-oss-120b"
-    prompt_input "TENSOR_PARALLEL" "Number of GPUs (tensor parallel size)" "2"
+    prompt_input "TENSOR_PARALLEL" "Number of GPUs (tensor parallel size)" "${DEFAULT_TP}"
     prompt_input "MAX_MODEL_LEN" "Maximum context length (tokens)" "8192"
     prompt_input "GPU_MEMORY_UTIL" "GPU memory utilization (0.0-1.0)" "0.90"
     echo ""
 
-    # Check worker node HF cache permissions via SSH
+    # Check worker node(s) HF cache permissions via SSH (loops over array form).
     if [ -n "$WORKER_HOST" ]; then
         echo -e "${YELLOW}Checking worker node HF cache permissions...${NC}"
         WORKER_USER="${WORKER_USER:-$(whoami)}"
-
-        # Check SSH connectivity first
-        if ssh -o ConnectTimeout=5 -o BatchMode=yes "${WORKER_USER}@${WORKER_HOST}" "exit" 2>/dev/null; then
-            # Check for root-owned files on worker
-            root_owned=$(ssh "${WORKER_USER}@${WORKER_HOST}" "find $HF_CACHE -user root 2>/dev/null | head -5" 2>/dev/null)
-
-            if [ -n "$root_owned" ]; then
-                echo -e "${RED}⚠${NC}  Found root-owned files in $HF_CACHE on worker ($WORKER_HOST)"
-                echo "   Docker containers run as root and create files owned by root."
-                echo "   This will cause rsync permission errors during model sync."
-                echo ""
-                echo -e "${YELLOW}To fix, run this on the worker node:${NC}"
-                echo "   sudo chown -R \$USER $HF_CACHE"
-                echo ""
-                read -p "Would you like to fix worker permissions now? (requires sudo on worker) [y/N]: " fix_worker_perms
-                if [[ "$fix_worker_perms" =~ ^[Yy]$ ]]; then
-                    echo "Running on worker: sudo chown -R $WORKER_USER $HF_CACHE"
-                    if ssh -t "${WORKER_USER}@${WORKER_HOST}" "sudo chown -R $WORKER_USER $HF_CACHE" 2>/dev/null; then
-                        echo -e "${GREEN}✓${NC} Worker permissions fixed successfully"
-                    else
-                        echo -e "${RED}✗${NC} Failed to fix worker permissions. Please run manually on worker:"
-                        echo "   sudo chown -R \$USER $HF_CACHE"
+        for w in "${_WHOSTS[@]}"; do
+            if ssh -o ConnectTimeout=5 -o BatchMode=yes "${WORKER_USER}@${w}" "exit" 2>/dev/null; then
+                root_owned=$(ssh "${WORKER_USER}@${w}" "find $HF_CACHE -user root 2>/dev/null | head -5" 2>/dev/null)
+                if [ -n "$root_owned" ]; then
+                    echo -e "${RED}⚠${NC}  ${w}: found root-owned files in $HF_CACHE"
+                    read -p "       Fix permissions on ${w}? (requires sudo on worker) [y/N]: " fix_worker_perms
+                    if [[ "$fix_worker_perms" =~ ^[Yy]$ ]]; then
+                        if ssh -t "${WORKER_USER}@${w}" "sudo chown -R $WORKER_USER $HF_CACHE" 2>/dev/null; then
+                            echo -e "       ${GREEN}✓${NC} Permissions fixed on ${w}"
+                        else
+                            echo -e "       ${RED}✗${NC} Failed to fix permissions on ${w} - run manually:"
+                            echo "         ssh ${WORKER_USER}@${w} 'sudo chown -R \$USER $HF_CACHE'"
+                        fi
                     fi
+                else
+                    echo -e "  ${GREEN}✓${NC} ${w}: HF cache permissions OK ($HF_CACHE)"
                 fi
             else
-                echo -e "${GREEN}✓${NC} Worker HF cache permissions OK ($HF_CACHE on $WORKER_HOST)"
+                echo -e "  ${YELLOW}⚠${NC}  ${w}: cannot SSH (skipping permission check)"
+                echo "       Run: ./setup-env.sh --discover  # to push SSH keys via mDNS"
             fi
-        else
-            echo -e "${YELLOW}⚠${NC}  Cannot SSH to worker ($WORKER_HOST) - skipping permission check"
-            echo "   Make sure SSH keys are set up for passwordless access"
-        fi
+        done
         echo ""
     fi
 fi

@@ -108,38 +108,178 @@ docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ```
 If this fails, install/configure the NVIDIA Container Toolkit.
 
-### 3. InfiniBand Network Configuration (Dual-Node Only)
+### 3. Multi-Spark Initial Setup (skip for single-Spark)
 
-**Note:** Skip this section for single-node setups.
+**Single-Spark users:** skip this entire section. Single-Spark mode needs only the GPU drivers and Docker (steps 1–2 above) plus a HuggingFace token (step 5 below).
 
-**CRITICAL:** InfiniBand (QSFP) interfaces must be configured and operational for multi-node performance.
+**Multi-Spark users:** these are the prerequisites for getting 2+ DGX Sparks talking to each other before our cluster scripts take over. This section paraphrases NVIDIA's [Multi Sparks Through Switch](https://build.nvidia.com/spark/multi-sparks-through-switch/multi-sparks) playbook so you can do it without bouncing between docs. If you'd rather use NVIDIA's tooling directly (their `spark_cluster_setup.sh` is a JSON-config-driven one-shot), see the "Alternative: NVIDIA's bootstrap script" note at the end of this section.
+
+#### 3a. Same username + password on every Spark
+
+Our `start_cluster.sh` SSHes from the head Spark to every worker as the same user. Pick a username (e.g. your own login, or `nvidia`) and create it identically on every Spark:
 
 ```bash
-# Install InfiniBand Tools
-sudo apt install infiniband-diags
-
-# Check InfiniBand status
-ibstatus
-
-# Find InfiniBand interfaces (typically enp1s0f1np1, enP2p1s0f1np1 on DGX Spark)
-ip addr show | grep 169.254
-
-# Verify both nodes can reach each other via InfiniBand
-ping <infiniband-ip-of-other-node>
+# On each Spark, if the user doesn't already exist:
+sudo useradd -m <username>
+sudo usermod -aG sudo <username>
+sudo passwd <username>          # use the same password on every Spark
 ```
 
-InfiniBand IPs are typically in the `169.254.x.x` range.
+If you already log in to every Spark with the same username, skip this step.
 
-**Performance Warning:** Using standard Ethernet IPs instead of InfiniBand will result in **10-20x slower performance**.
+#### 3b. Verify the QSFP link is up at 200 Gb/s
 
-Need help with InfiniBand setup? See NVIDIA's guide: https://build.nvidia.com/spark/nccl/stacked-sparks
+The DGX Spark's CX7 NIC has two QSFP ports; each port has two logical interfaces (e.g. `enp1s0f1np1` and `enP2p1s0f1np1`). NVIDIA recommends using the **same physical port on every Spark** (the one farther from the Ethernet jack) to avoid NCCL headaches. On every Spark:
+
+```bash
+# Confirm interfaces show "(Up)" status
+ibdev2netdev
+
+# Confirm link speed
+sudo ethtool enp1s0f1np1 | grep Speed
+sudo ethtool enP2p1s0f1np1 | grep Speed
+# Expect: Speed: 200000Mb/s
+```
+
+If the speed is below 200 Gb/s, auto-negotiation may not have settled the right rate. Disable auto-neg on the corresponding switch port and pin it to 200G manually (e.g. `200G-baseCR4`), per your switch's manual.
+
+#### 3c. Configure CX7 IPs (netplan)
+
+Three options, all using netplan (`/etc/netplan/40-cx7.yaml`, mode 600). Pick **one** and apply it on every Spark.
+
+**Option A — DHCP from the switch** (recommended if your switch can run DHCP):
+```yaml
+# /etc/netplan/40-cx7.yaml
+network:
+  version: 2
+  ethernets:
+    enp1s0f1np1:
+      dhcp4: true
+    enP2p1s0f1np1:
+      dhcp4: true
+```
+
+**Option B — Link-local IPv4** (zero-config; gives you `169.254.x.x` per spark):
+```yaml
+network:
+  version: 2
+  ethernets:
+    enp1s0f1np1:
+      link-local: [ ipv4 ]
+    enP2p1s0f1np1:
+      link-local: [ ipv4 ]
+```
+
+**Option C — Static** (use this if you want predictable IPs; example for 4 Sparks on `192.168.100.0/24`):
+```yaml
+# Spark 1
+network:
+  version: 2
+  ethernets:
+    enp1s0f1np1:
+      addresses: [192.168.100.10/24]
+    enP2p1s0f1np1:
+      addresses: [192.168.100.11/24]
+
+# Spark 2: .12/.13     Spark 3: .14/.15     Spark 4: .16/.17
+```
+
+Apply the config:
+```bash
+sudo chmod 600 /etc/netplan/40-cx7.yaml
+sudo netplan apply
+ip addr show enp1s0f1np1 | grep -w inet     # should show your IP
+```
+
+#### 3d. Switch configuration (3+ Sparks only)
+
+For switched (3+ Spark) setups, the switch must put every CX7 port in a single layer-2 bridge so all Sparks share one broadcast domain. Some switches can only enable hardware offloading on a single bridge — keep them all on the default bridge if so. Refer to your switch's UI/CLI documentation for bridge management.
+
+For 2-Spark stacked setups (direct QSFP cable), no switch — skip this step.
+
+#### 3e. Passwordless SSH between Sparks
+
+You need bidirectional passwordless SSH so the head Spark can launch the worker scripts and so workers can communicate. Two ways:
+
+**Easy: use our `setup-env.sh --discover`** (wraps NVIDIA's mDNS-based discovery script). From any Spark:
+
+```bash
+./setup-env.sh --discover
+```
+
+This downloads NVIDIA's `discover-sparks` script, scans the local network for `dgx-spark-*.local` hostnames, prompts once for each Spark's password, and pushes SSH keys bidirectionally. Then re-run `source ./setup-env.sh` (without `--discover`) to capture the discovered IPs into `WORKER_HOST` / `WORKER_IB_IP`.
+
+**Manual: `ssh-copy-id` per Spark**. From your head Spark:
+
+```bash
+# Find each Spark's IB IP
+ip addr show enp1s0f1np1 | grep -w inet     # local IP
+# repeat on every other Spark to collect their IPs
+
+# Push keys (once per worker)
+ssh-keygen -t ed25519                         # if you don't already have a key
+ssh-copy-id -i ~/.ssh/id_ed25519.pub <user>@<worker-IP>
+
+# Verify
+ssh <user>@<worker-IP> hostname
+```
+
+Repeat for every worker. For a 4-Spark cluster, that's 3 `ssh-copy-id` calls from the head.
+
+#### 3f. (Optional) NCCL bandwidth smoke test
+
+Before launching vLLM, you can verify cross-Spark NCCL throughput with `all_gather_perf` from [nccl-tests](https://github.com/NVIDIA/nccl-tests). This catches "NCCL fell back to TCP sockets" before it bites you mid-model-load.
+
+```bash
+# On every Spark (one-time): build the tests
+git clone https://github.com/NVIDIA/nccl-tests
+cd nccl-tests && make MPI=1 MPI_HOME=/usr/lib/aarch64-linux-gnu/openmpi
+
+# From the head Spark, run a multi-host all_gather (example for 4 Sparks):
+export NCCL_SOCKET_IFNAME=enp1s0f1np1
+export UCX_NET_DEVICES=enp1s0f1np1
+mpirun -np 4 \
+  -H <head-IP>:1,<w1-IP>:1,<w2-IP>:1,<w3-IP>:1 \
+  --mca plm_rsh_agent "ssh -o StrictHostKeyChecking=no" \
+  -x LD_LIBRARY_PATH=$LD_LIBRARY_PATH \
+  $HOME/nccl-tests/build/all_gather_perf
+```
+
+You should see ~150–180 Gb/s per host on a healthy 200G fabric. Numbers below ~50 Gb/s usually mean NCCL fell back to socket transport — check that `NCCL_IB_HCA` and `NCCL_SOCKET_IFNAME` point at your CX7 device.
+
+#### 3g. Performance note: IB verbs vs TCP-on-QSFP
+
+By default our cluster scripts enable RDMA verbs (`NCCL_IB_HCA`, `NCCL_NET_GDR_LEVEL=5`) for max throughput. NVIDIA's official playbook only sets `NCCL_SOCKET_IFNAME` and routes NCCL over TCP on the same QSFP interface — slower in theory but more compatible across switch configurations. If you hit NCCL hangs during model load, the easy workaround is to fall back to the TCP path:
+
+```bash
+export NCCL_IB_DISABLE=1
+./start_cluster.sh
+```
+
+**Performance warning:** putting traffic on a slow Ethernet interface instead of the 200Gb/s QSFP link will cost you 10-20x throughput.
+
+#### Alternative: NVIDIA's bootstrap script
+
+If you'd rather have NVIDIA's tooling do steps 3a–3e in one shot from a JSON config:
+
+```bash
+git clone https://github.com/NVIDIA/dgx-spark-playbooks
+cd dgx-spark-playbooks/nvidia/multi-sparks-through-switch/assets/spark_cluster_setup
+# edit config/spark_config_b2b.json with {ip_address, port, user, password} per Spark
+bash spark_cluster_setup.sh -c config/spark_config_b2b.json --run-setup
+```
+
+Once that completes, return here at section 4 (Firewall) and continue.
 
 ### 4. Firewall Configuration
 
-Ensure the following ports are open between both nodes:
-- **6379** - Ray GCS
-- **8265** - Ray Dashboard
-- **8000** - vLLM API
+Ensure the following ports are open between Sparks (Ray and vLLM all run on the head Spark):
+
+- **6385** - Ray GCS (head only). The default moved off `6380` to avoid collisions with common Redis host-port mappings under `--network host`. Override via `RAY_PORT` in `config.env`.
+- **8265** - Ray dashboard (head only)
+- **8000** - vLLM API (head only)
+
+Workers don't need any of these ports open inbound — they connect *to* the head's GCS port outbound. NCCL traffic between Sparks uses the QSFP fabric directly and is generally not behind a host firewall.
 
 ### 5. Hugging Face Authentication (for gated models)
 
