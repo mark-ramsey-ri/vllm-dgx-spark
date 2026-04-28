@@ -1,10 +1,14 @@
 # vLLM on DGX Spark Cluster
 
-Deploy [vLLM](https://github.com/vllm-project/vllm) on NVIDIA DGX Spark systems - supports both single-node and dual-node cluster configurations with InfiniBand RDMA for serving large language models.
+Deploy [vLLM](https://github.com/vllm-project/vllm) on **1 to N NVIDIA DGX Spark systems** — single Spark, two Sparks via direct QSFP cable, or 3+ Sparks via a switched fabric — for serving large language models with tensor parallelism scaling automatically with the cluster size.
 
 > **DISCLAIMER**: This project is NOT affiliated with, endorsed by, or officially supported by NVIDIA, vLLM, or any other organization. This is a community-driven effort to run vLLM on DGX Spark hardware. Use at your own risk. The software is provided "AS IS", without warranty of any kind.
 
-> **Upgraded (2026-04-28)**: Components bumped to `nvcr.io/nvidia/vllm:26.04-py3` (vLLM 0.19.0, PyTorch 2.12.0a0, CUDA 13.2.1) with Ray 2.55.1. The 26.04 container no longer ships Ray, so `start_cluster.sh` and `start_worker_vllm.sh` now `pip install ray[default]==${RAY_VERSION}` into the head and worker containers at startup (~30s). Smoke tested on a single Spark; multi-node TP=2 verification pending.
+> **Updated (2026-04-28)**:
+> - **1-to-N Spark support** — `WORKER_HOST` and `WORKER_IB_IP` are now space-separated lists; `TENSOR_PARALLEL` defaults to `1 + N` workers. The same scripts handle single Spark, 2 Sparks (direct cable), and 3+ Sparks (switched fabric). Verified end-to-end on 1 and 2 Sparks; the n>2 code paths are reviewed but not yet exercised on real hardware (third Spark arriving soon).
+> - **41 model presets** in `switch_model.sh` — 16 [community] + 25 [NVIDIA] from the official Spark vLLM matrix (FP8 / NVFP4 / MXFP4 / BF16 quants).
+> - **Multi-Spark OS-setup steps inlined** in section 3 of this README (paraphrased from NVIDIA's playbook so users don't have to bounce between docs); `./setup-env.sh --discover` wraps NVIDIA's mDNS discovery for SSH key push.
+> - **Container** `nvcr.io/nvidia/vllm:26.04-py3` (vLLM 0.19.0, PyTorch 2.12.0a0, CUDA 13.2.1) with Ray 2.55.1. The 26.04 container no longer ships Ray, so the cluster scripts `pip install ray[default]==${RAY_VERSION}` into the head and worker containers at startup (~30s).
 >
 > Previous (2026-04-09): `nvcr.io/nvidia/vllm:26.03-py3` (vLLM 0.17.1) with Ray 2.54.0.
 
