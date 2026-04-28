@@ -231,6 +231,7 @@ docker run -d \
   --device=/dev/infiniband \
   -v "${HF_CACHE}:/root/.cache/huggingface" \
   -e VLLM_HOST_IP="${WORKER_IP}" \
+  -e MASTER_ADDR="${HEAD_IP}" \
   -e GLOO_SOCKET_IFNAME="${GLOO_IF}" \
   -e TP_SOCKET_IFNAME="${TP_IF}" \
   -e NCCL_SOCKET_IFNAME="${NCCL_IF}" \

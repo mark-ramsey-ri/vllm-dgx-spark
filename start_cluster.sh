@@ -30,17 +30,41 @@ RAY_VERSION="${RAY_VERSION:-2.55.1}"
 SKIP_MODEL_DOWNLOAD="${SKIP_MODEL_DOWNLOAD:-}"
 
 # Worker node configuration (for orchestrated setup)
-# WORKER_HOST: Ethernet IP for SSH access (e.g., 192.168.7.111)
-# WORKER_IB_IP: InfiniBand IP for NCCL communication (e.g., 169.254.216.8)
-# Legacy WORKER_IPS is supported for backwards compatibility
+# WORKER_HOST: space-separated list of Ethernet IPs for SSH access.
+#   1 worker:  WORKER_HOST="192.168.7.111"
+#   N workers: WORKER_HOST="192.168.7.111 192.168.7.112 192.168.7.113"
+# WORKER_IB_IP: space-separated list of InfiniBand IPs for NCCL communication,
+#   1:1 positional with WORKER_HOST. If empty, NCCL uses the SSH IPs.
+# Legacy WORKER_IPS is supported for backwards compatibility (treated as
+# WORKER_IB_IP if WORKER_IB_IP is unset).
 WORKER_HOST="${WORKER_HOST:-}"
 WORKER_IB_IP="${WORKER_IB_IP:-${WORKER_IPS:-}}"  # Fallback to WORKER_IPS for backwards compat
 WORKER_USER="${WORKER_USER:-$(whoami)}"
 WORKER_HF_CACHE="${WORKER_HF_CACHE:-${HF_CACHE}}"
 
+# Split into arrays. read -ra on an empty string yields an empty array.
+read -ra WORKER_HOST_ARRAY <<< "${WORKER_HOST}"
+read -ra WORKER_IB_IP_ARRAY <<< "${WORKER_IB_IP}"
+WORKER_COUNT="${#WORKER_HOST_ARRAY[@]}"
+
+# Validate WORKER_IB_IP cardinality: must match WORKER_HOST when given.
+if [ "${#WORKER_IB_IP_ARRAY[@]}" -gt 0 ] && [ "${#WORKER_IB_IP_ARRAY[@]}" -ne "${WORKER_COUNT}" ]; then
+  echo "ERROR: WORKER_IB_IP has ${#WORKER_IB_IP_ARRAY[@]} entries but WORKER_HOST has ${WORKER_COUNT}."
+  echo "       They must be 1:1 positional: WORKER_HOST=\"a b c\" needs WORKER_IB_IP=\"x y z\"."
+  exit 1
+fi
+
+# When WORKER_IB_IP is unset, mirror WORKER_HOST so per-worker NCCL IPs are
+# always available downstream without scattered conditionals.
+if [ "${#WORKER_IB_IP_ARRAY[@]}" -eq 0 ] && [ "${WORKER_COUNT}" -gt 0 ]; then
+  WORKER_IB_IP_ARRAY=("${WORKER_HOST_ARRAY[@]}")
+fi
+
 # Model configuration
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
-TENSOR_PARALLEL="${TENSOR_PARALLEL:-2}"
+# Default TP scales with cluster size: 1 GPU per Spark (head + N workers).
+# Override via TENSOR_PARALLEL=... if you want to under-utilize GPUs.
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-$((WORKER_COUNT + 1))}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 GPU_MEMORY_UTIL="${GPU_MEMORY_UTIL:-0.90}"
 SHM_SIZE="${SHM_SIZE:-16g}"
@@ -82,8 +106,8 @@ if [ "${LOCAL_GPU_COUNT}" -eq 0 ]; then
 fi
 
 # Determine if we're in single-node mode
-# Single-node: no WORKER_HOST and TENSOR_PARALLEL fits on local GPUs
-if [ -z "${WORKER_HOST}" ] && [ "${TENSOR_PARALLEL}" -le "${LOCAL_GPU_COUNT}" ]; then
+# Single-node: no workers configured and TENSOR_PARALLEL fits on local GPUs
+if [ "${WORKER_COUNT}" -eq 0 ] && [ "${TENSOR_PARALLEL}" -le "${LOCAL_GPU_COUNT}" ]; then
   SINGLE_NODE_MODE=true
 else
   SINGLE_NODE_MODE=false
@@ -244,11 +268,14 @@ PREFLIGHT_FAILED=false
 
 # Check 1: Worker configuration for distributed setup
 echo "Checking worker configuration..."
-# If WORKER_HOST not set but WORKER_IB_IP is, fall back for backwards compat
-if [ -z "${WORKER_HOST}" ] && [ -n "${WORKER_IB_IP}" ]; then
+# If WORKER_HOST not set but WORKER_IB_IP is, fall back for backwards compat.
+# (Original 1-worker setups sometimes only set WORKER_IB_IP via WORKER_IPS.)
+if [ "${WORKER_COUNT}" -eq 0 ] && [ "${#WORKER_IB_IP_ARRAY[@]}" -gt 0 ]; then
   echo "  ⚠️  WORKER_HOST not set, using WORKER_IB_IP (${WORKER_IB_IP}) for SSH"
+  WORKER_HOST_ARRAY=("${WORKER_IB_IP_ARRAY[@]}")
   WORKER_HOST="${WORKER_IB_IP}"
-  # Re-evaluate single-node mode since WORKER_HOST changed
+  WORKER_COUNT="${#WORKER_HOST_ARRAY[@]}"
+  # Re-evaluate single-node mode since WORKER_COUNT changed
   SINGLE_NODE_MODE=false
 fi
 
@@ -259,47 +286,45 @@ if [ "${SINGLE_NODE_MODE}" = "true" ]; then
   echo "  Tensor Parallel: ${TENSOR_PARALLEL}"
   echo ""
   echo "  For multi-node distributed inference, set:"
-  echo "    export WORKER_HOST=\"192.168.x.x\"    # Ethernet IP for SSH"
-  echo "    export WORKER_IB_IP=\"169.254.x.x\"   # InfiniBand IP for NCCL"
+  echo "    export WORKER_HOST=\"192.168.x.x [192.168.x.y ...]\"    # Ethernet IP(s) for SSH"
+  echo "    export WORKER_IB_IP=\"169.254.x.x [169.254.x.y ...]\"   # InfiniBand IP(s) for NCCL"
   echo ""
-elif [ -z "${WORKER_HOST}" ]; then
+elif [ "${WORKER_COUNT}" -eq 0 ]; then
   # TENSOR_PARALLEL > LOCAL_GPU_COUNT but no WORKER_HOST
   echo "  ⚠️  TENSOR_PARALLEL=${TENSOR_PARALLEL} exceeds local GPUs (${LOCAL_GPU_COUNT})"
   echo ""
   echo "  Either:"
   echo "    1. Set TENSOR_PARALLEL=${LOCAL_GPU_COUNT} for single-node, OR"
-  echo "    2. Configure a worker node:"
-  echo "       export WORKER_HOST=\"192.168.x.x\"    # Ethernet IP for SSH"
-  echo "       export WORKER_IB_IP=\"169.254.x.x\"   # InfiniBand IP for NCCL"
+  echo "    2. Configure worker node(s):"
+  echo "       export WORKER_HOST=\"192.168.x.x [192.168.x.y ...]\"    # Ethernet IP(s) for SSH"
+  echo "       export WORKER_IB_IP=\"169.254.x.x [169.254.x.y ...]\"   # InfiniBand IP(s) for NCCL"
   echo ""
   PREFLIGHT_FAILED=true
 else
-  echo "  ✅ WORKER_HOST=${WORKER_HOST} (SSH)"
-  if [ -n "${WORKER_IB_IP}" ]; then
-    echo "  ✅ WORKER_IB_IP=${WORKER_IB_IP} (NCCL)"
-  fi
+  echo "  ✅ ${WORKER_COUNT} worker(s) configured:"
+  for i in "${!WORKER_HOST_ARRAY[@]}"; do
+    if [ "${i}" -lt "${#WORKER_IB_IP_ARRAY[@]}" ] && [ "${WORKER_IB_IP_ARRAY[i]}" != "${WORKER_HOST_ARRAY[i]}" ]; then
+      echo "       worker $((i+1)): ${WORKER_HOST_ARRAY[i]} (SSH) / ${WORKER_IB_IP_ARRAY[i]} (NCCL)"
+    else
+      echo "       worker $((i+1)): ${WORKER_HOST_ARRAY[i]}"
+    fi
+  done
 fi
 
-# Check 2: SSH connectivity to worker
-if [ -n "${WORKER_HOST}" ]; then
+# Check 2: SSH connectivity to each worker
+if [ "${WORKER_COUNT}" -gt 0 ]; then
   echo ""
-  echo "Checking SSH connectivity to worker..."
-  if ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${WORKER_HOST}" "echo 'SSH OK'" >/dev/null 2>&1; then
-    echo "  ✅ SSH to ${WORKER_USER}@${WORKER_HOST} successful"
-  else
-    echo "  ❌ Cannot SSH to ${WORKER_USER}@${WORKER_HOST}"
-    echo ""
-    echo "  Passwordless SSH must be configured. Run:"
-    echo ""
-    echo "    ssh-copy-id ${WORKER_USER}@${WORKER_HOST}"
-    echo ""
-    echo "  Note: You also need passwordless SSH to the worker's InfiniBand IP"
-    echo "  for NCCL communication. If your worker has IB IP 169.254.x.x, also run:"
-    echo ""
-    echo "    ssh-copy-id ${WORKER_USER}@<worker-infiniband-ip>"
-    echo ""
-    PREFLIGHT_FAILED=true
-  fi
+  echo "Checking SSH connectivity to ${WORKER_COUNT} worker(s)..."
+  for ip in "${WORKER_HOST_ARRAY[@]}"; do
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${ip}" "echo 'SSH OK'" >/dev/null 2>&1; then
+      echo "  ✅ SSH to ${WORKER_USER}@${ip} successful"
+    else
+      echo "  ❌ Cannot SSH to ${WORKER_USER}@${ip}"
+      echo "     Run: ssh-copy-id ${WORKER_USER}@${ip}"
+      echo "     (and to the worker's IB IP if different)"
+      PREFLIGHT_FAILED=true
+    fi
+  done
 fi
 
 # Check 3: Docker available
@@ -366,51 +391,55 @@ else
   echo "  ℹ️  Local HF cache will be created at ${HF_CACHE}"
 fi
 
-# Check 7: Remote HuggingFace cache permissions (only if WORKER_HOST is set)
-if [ -n "${WORKER_HOST}" ]; then
+# Check 7: Remote HuggingFace cache permissions on each worker
+if [ "${WORKER_COUNT}" -gt 0 ]; then
   echo ""
-  echo "Checking remote HuggingFace cache permissions on worker..."
-  REMOTE_HF_WRITABLE=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${WORKER_HOST}" "
-    if [ -d '${WORKER_HF_CACHE}' ]; then
-      if [ -w '${WORKER_HF_CACHE}' ]; then
-        echo 'writable'
-      else
-        echo 'not_writable'
-      fi
-    else
-      echo 'not_exists'
-    fi
-  " 2>/dev/null || echo "ssh_failed")
-
-  case "$REMOTE_HF_WRITABLE" in
-    writable)
-      echo "  ✅ Remote HF cache is writable (${WORKER_HF_CACHE})"
-      ;;
-    not_writable)
-      echo "  ⚠️  Remote HF cache is not writable: ${WORKER_HF_CACHE}"
-      echo ""
-      echo "  Docker containers run as root and may have created files owned by root."
-      read -p "  Fix permissions on worker now? (requires sudo password on worker) [y/N]: " fix_remote_perms
-      if [[ "$fix_remote_perms" =~ ^[Yy]$ ]]; then
-        echo "  Running: sudo chown -R ${WORKER_USER} ${WORKER_HF_CACHE} on ${WORKER_HOST}"
-        if ssh -t "${WORKER_USER}@${WORKER_HOST}" "sudo chown -R ${WORKER_USER} '${WORKER_HF_CACHE}'"; then
-          echo "  ✅ Remote HF cache permissions fixed"
+  echo "Checking remote HuggingFace cache permissions on ${WORKER_COUNT} worker(s)..."
+  for ip in "${WORKER_HOST_ARRAY[@]}"; do
+    REMOTE_HF_WRITABLE=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${ip}" "
+      if [ -d '${WORKER_HF_CACHE}' ]; then
+        if [ -w '${WORKER_HF_CACHE}' ]; then
+          echo 'writable'
         else
-          echo "  ❌ Failed to fix remote permissions"
-          PREFLIGHT_FAILED=true
+          echo 'not_writable'
         fi
       else
-        echo "  ❌ Remote HF cache permissions not fixed - rsync may fail"
-        PREFLIGHT_FAILED=true
+        echo 'not_exists'
       fi
-      ;;
-    not_exists)
-      echo "  ℹ️  Remote HF cache will be created at ${WORKER_HF_CACHE}"
-      ;;
-    ssh_failed)
-      echo "  ⚠️  Could not check remote HF cache (SSH failed)"
-      ;;
-  esac
+    " 2>/dev/null || echo "ssh_failed")
+
+    case "$REMOTE_HF_WRITABLE" in
+      writable)
+        echo "  ✅ ${ip}: HF cache is writable (${WORKER_HF_CACHE})"
+        ;;
+      not_writable)
+        echo "  ⚠️  ${ip}: HF cache is not writable: ${WORKER_HF_CACHE}"
+        if [ -t 0 ]; then
+          read -p "       Fix permissions on ${ip}? (requires sudo password) [y/N]: " fix_remote_perms
+        else
+          fix_remote_perms="n"
+          echo "       Non-interactive shell - not prompting; cluster start may fail."
+        fi
+        if [[ "$fix_remote_perms" =~ ^[Yy]$ ]]; then
+          if ssh -t "${WORKER_USER}@${ip}" "sudo chown -R ${WORKER_USER} '${WORKER_HF_CACHE}'"; then
+            echo "       ✅ Permissions fixed on ${ip}"
+          else
+            echo "       ❌ Failed to fix permissions on ${ip}"
+            PREFLIGHT_FAILED=true
+          fi
+        else
+          echo "       ❌ Permissions not fixed - rsync to ${ip} may fail"
+          PREFLIGHT_FAILED=true
+        fi
+        ;;
+      not_exists)
+        echo "  ℹ️  ${ip}: HF cache will be created at ${WORKER_HF_CACHE}"
+        ;;
+      ssh_failed)
+        echo "  ⚠️  ${ip}: could not check remote HF cache (SSH failed)"
+        ;;
+    esac
+  done
 fi
 
 echo ""
@@ -442,20 +471,21 @@ log "  Tensor Parallel: ${TENSOR_PARALLEL}"
 log "  Load Format:     ${LOAD_FORMAT}"
 log "  Ray Version:     ${RAY_VERSION}"
 log ""
-if [ -n "${WORKER_HOST}" ]; then
-  log "Worker Node Configuration (orchestrated setup enabled):"
-  log "  Worker Host:     ${WORKER_HOST} (SSH)"
-  if [ -n "${WORKER_IB_IP}" ]; then
-    log "  Worker IB IP:    ${WORKER_IB_IP} (NCCL)"
-  fi
+if [ "${WORKER_COUNT}" -gt 0 ]; then
+  log "Worker Node Configuration (orchestrated setup enabled, ${WORKER_COUNT} worker(s)):"
+  for i in "${!WORKER_HOST_ARRAY[@]}"; do
+    if [ "${WORKER_IB_IP_ARRAY[i]}" != "${WORKER_HOST_ARRAY[i]}" ]; then
+      log "  worker $((i+1)):        ${WORKER_HOST_ARRAY[i]} (SSH) / ${WORKER_IB_IP_ARRAY[i]} (NCCL)"
+    else
+      log "  worker $((i+1)):        ${WORKER_HOST_ARRAY[i]}"
+    fi
+  done
   log "  Worker User:     ${WORKER_USER}"
   log "  Worker HF Cache: ${WORKER_HF_CACHE}"
   log ""
 else
   log "Worker Node Configuration:"
-  log "  ⚠️  WORKER_HOST not set - manual worker setup required"
-  log "     export WORKER_HOST=<ethernet_ip>  # For SSH"
-  log "     export WORKER_IB_IP=<ib_ip>       # For NCCL"
+  log "  Single-node mode (no remote workers configured)"
   log ""
 fi
 if [ "${SINGLE_NODE_MODE}" = "true" ]; then
@@ -483,8 +513,10 @@ log ""
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Calculate total steps based on whether worker orchestration is enabled
-if [ -n "${WORKER_HOST}" ]; then
+# Calculate total steps based on whether worker orchestration is enabled.
+# Multi-node has 3 extra "phase" steps (rsync model, scp worker script, start
+# workers) compared to single-node; each loops over WORKER_COUNT internally.
+if [ "${WORKER_COUNT}" -gt 0 ]; then
   TOTAL_STEPS=12
 else
   TOTAL_STEPS=9
@@ -511,6 +543,10 @@ log "Step 3/${TOTAL_STEPS}: Starting head container"
 # These are passed into the container to configure GPU communication
 ENV_ARGS=(
   -e VLLM_HOST_IP="${HEAD_IP}"
+  # NCCL/torch.distributed bootstrap rendezvous - NVIDIA's official Spark
+  # playbook sets MASTER_ADDR explicitly; some torch versions otherwise
+  # default to 127.0.0.1 inside the container and break multi-node init.
+  -e MASTER_ADDR="${HEAD_IP}"
   # Debug settings (can be disabled for production by setting NCCL_DEBUG=WARN)
   -e NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
   -e NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET}"
@@ -700,86 +736,87 @@ fi
 # Worker orchestration steps (only if WORKER_HOST is set)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-if [ -n "${WORKER_HOST}" ]; then
+if [ "${WORKER_COUNT}" -gt 0 ]; then
   if [ -n "${SKIP_MODEL_DOWNLOAD}" ]; then
-    log "Step 7/${TOTAL_STEPS}: Skipping model rsync (offline mode)"
-    log "  SKIP_MODEL_DOWNLOAD is set - worker is expected to have its own"
+    log "Step 7/${TOTAL_STEPS}: Skipping model rsync (offline mode, ${WORKER_COUNT} worker(s))"
+    log "  SKIP_MODEL_DOWNLOAD is set - workers are expected to have their own"
     log "  pre-staged HF cache at ${WORKER_HF_CACHE}/hub/."
 
-    # Still need SSH to start the worker, so verify it now
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${WORKER_HOST}" "echo 'SSH OK'" >/dev/null 2>&1; then
-      error "Cannot SSH to ${WORKER_USER}@${WORKER_HOST}. Please ensure:"$'\n'"  1. SSH keys are set up (ssh-copy-id ${WORKER_USER}@${WORKER_HOST})"$'\n'"  2. The worker host is reachable"
-    fi
-    log "  ✅ SSH connectivity verified"
-  else
-    log "Step 7/${TOTAL_STEPS}: Syncing model to worker node"
-    log "  Worker host: ${WORKER_USER}@${WORKER_HOST}"
-    log "  Source: ${HF_CACHE}/"
-    log "  Destination: ${WORKER_HF_CACHE}/"
-    log ""
-    log "  This may take a while for large models..."
-
-    # Test SSH connectivity first
-    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${WORKER_HOST}" "echo 'SSH OK'" >/dev/null 2>&1; then
-      error "Cannot SSH to ${WORKER_USER}@${WORKER_HOST}. Please ensure:"$'\n'"  1. SSH keys are set up (ssh-copy-id ${WORKER_USER}@${WORKER_HOST})"$'\n'"  2. The worker host is reachable"
-    fi
-    log "  ✅ SSH connectivity verified"
-
-    # Ensure destination directory exists and fix permissions if needed
-    ssh "${WORKER_USER}@${WORKER_HOST}" "
-      mkdir -p ${WORKER_HF_CACHE}/hub
-      # Fix ownership if directories exist but are owned by root (from Docker)
-      if [ -d '${WORKER_HF_CACHE}' ] && [ ! -w '${WORKER_HF_CACHE}' ]; then
-        echo 'Fixing permissions on ${WORKER_HF_CACHE} (requires sudo)...'
-        sudo chown -R \$(id -u):\$(id -g) '${WORKER_HF_CACHE}' 2>/dev/null || true
+    # Still need SSH to start each worker, verify them all now
+    for ip in "${WORKER_HOST_ARRAY[@]}"; do
+      if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${ip}" "echo 'SSH OK'" >/dev/null 2>&1; then
+        error "Cannot SSH to ${WORKER_USER}@${ip}. Run: ssh-copy-id ${WORKER_USER}@${ip}"
       fi
-    "
+    done
+    log "  ✅ SSH connectivity verified to all ${WORKER_COUNT} worker(s)"
+  else
+    log "Step 7/${TOTAL_STEPS}: Syncing model to ${WORKER_COUNT} worker node(s)"
+    log "  Source: ${HF_CACHE}/"
+    log "  Destination on each worker: ${WORKER_HF_CACHE}/"
+    log "  This may take a while for large models..."
+    log ""
 
-    # Convert model name to HF cache directory format (e.g., openai/gpt-oss-120b -> models--openai--gpt-oss-120b)
+    # Convert model name to HF cache directory format
     MODEL_CACHE_NAME="models--$(echo "${MODEL}" | sed 's|/|--|g')"
     MODEL_CACHE_PATH="${HF_CACHE}/hub/${MODEL_CACHE_NAME}"
-
     if [ ! -d "${MODEL_CACHE_PATH}" ]; then
       error "Model cache not found at ${MODEL_CACHE_PATH}. Download the model first."
     fi
 
-    log "  Syncing model: ${MODEL_CACHE_NAME}"
-    log "  From: ${MODEL_CACHE_PATH}"
-    log "  To:   ${WORKER_USER}@${WORKER_HOST}:${WORKER_HF_CACHE}/hub/"
+    # Pre-flight all workers in parallel (SSH + permission fix), then rsync
+    # sequentially so progress output stays readable. (Parallel rsync is a
+    # future optimization for many-worker clusters; sequential is fine for
+    # 1-3 workers and keeps the diagnostic output legible.)
+    for ip in "${WORKER_HOST_ARRAY[@]}"; do
+      if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${WORKER_USER}@${ip}" "echo 'SSH OK'" >/dev/null 2>&1; then
+        error "Cannot SSH to ${WORKER_USER}@${ip}. Run: ssh-copy-id ${WORKER_USER}@${ip}"
+      fi
+      ssh "${WORKER_USER}@${ip}" "
+        mkdir -p ${WORKER_HF_CACHE}/hub
+        if [ -d '${WORKER_HF_CACHE}' ] && [ ! -w '${WORKER_HF_CACHE}' ]; then
+          echo 'Fixing permissions on ${WORKER_HF_CACHE} (requires sudo)...'
+          sudo chown -R \$(id -u):\$(id -g) '${WORKER_HF_CACHE}' 2>/dev/null || true
+        fi
+      "
+    done
+    log "  ✅ SSH connectivity verified to all ${WORKER_COUNT} worker(s)"
+    log ""
 
-    # Rsync only the specific model directory (exclude lock files)
-    # Use --no-perms --no-owner --no-group to avoid permission issues with mixed ownership
-    if ! rsync -a --info=progress2 --human-readable \
-      --no-perms --no-owner --no-group \
-      --exclude='.locks' \
-      --exclude='*.lock' \
-      "${MODEL_CACHE_PATH}" \
-      "${WORKER_USER}@${WORKER_HOST}:${WORKER_HF_CACHE}/hub/"; then
-      error "Failed to rsync model to worker node"
-    fi
-    log "  ✅ Model synced to worker"
+    for i in "${!WORKER_HOST_ARRAY[@]}"; do
+      ip="${WORKER_HOST_ARRAY[i]}"
+      log "  [$((i+1))/${WORKER_COUNT}] Syncing ${MODEL_CACHE_NAME} -> ${WORKER_USER}@${ip}:${WORKER_HF_CACHE}/hub/"
+      if ! rsync -a --info=progress2 --human-readable \
+        --no-perms --no-owner --no-group \
+        --exclude='.locks' \
+        --exclude='*.lock' \
+        "${MODEL_CACHE_PATH}" \
+        "${WORKER_USER}@${ip}:${WORKER_HF_CACHE}/hub/"; then
+        error "Failed to rsync model to ${ip}"
+      fi
+    done
+    log "  ✅ Model synced to all ${WORKER_COUNT} worker(s)"
   fi
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  log "Step 8/${TOTAL_STEPS}: Copying worker script to worker node"
+  log "Step 8/${TOTAL_STEPS}: Copying worker script to ${WORKER_COUNT} worker(s)"
   WORKER_SCRIPT="${SCRIPT_DIR}/start_worker_vllm.sh"
-
   if [ ! -f "${WORKER_SCRIPT}" ]; then
     error "Worker script not found at ${WORKER_SCRIPT}"
   fi
 
-  # Copy the worker script to the worker's home directory
-  if ! scp "${WORKER_SCRIPT}" "${WORKER_USER}@${WORKER_HOST}:~/start_worker_vllm.sh"; then
-    error "Failed to copy worker script to ${WORKER_HOST}"
-  fi
-  log "  ✅ Worker script copied to ${WORKER_USER}@${WORKER_HOST}:~/start_worker_vllm.sh"
+  for ip in "${WORKER_HOST_ARRAY[@]}"; do
+    if ! scp "${WORKER_SCRIPT}" "${WORKER_USER}@${ip}:~/start_worker_vllm.sh" >/dev/null; then
+      error "Failed to copy worker script to ${ip}"
+    fi
+  done
+  log "  ✅ Worker script copied to all ${WORKER_COUNT} worker(s)"
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Step number depends on whether worker orchestration steps ran
-if [ -n "${WORKER_HOST}" ]; then
+if [ "${WORKER_COUNT}" -gt 0 ]; then
   RAY_STEP=9
 else
   RAY_STEP=7
@@ -810,58 +847,64 @@ done
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-if [ -n "${WORKER_HOST}" ]; then
-  # Orchestrated mode: Start worker via SSH
-  log "Step 10/${TOTAL_STEPS}: Starting worker node via SSH"
-  log "  Starting worker script on ${WORKER_USER}@${WORKER_HOST}..."
+if [ "${WORKER_COUNT}" -gt 0 ]; then
+  # Orchestrated mode: start each worker via SSH with per-worker WORKER_IP
+  log "Step 10/${TOTAL_STEPS}: Starting ${WORKER_COUNT} worker node(s) via SSH"
   log ""
 
-  # Build environment variables to pass to worker
-  # Worker needs HEAD_IP, MODEL, HF_TOKEN, and HF_CACHE
-  WORKER_ENV="HEAD_IP=${HEAD_IP} MODEL=${MODEL} HF_CACHE=${WORKER_HF_CACHE} RAY_VERSION=${RAY_VERSION} RAY_PORT=${RAY_PORT} SKIP_MODEL_DOWNLOAD=1"
+  # Common env vars - per-worker WORKER_IP is appended below.
+  # MASTER_ADDR points workers' torch.distributed at the head's IB IP.
+  COMMON_WORKER_ENV="HEAD_IP=${HEAD_IP} MASTER_ADDR=${HEAD_IP} MODEL=${MODEL} HF_CACHE=${WORKER_HF_CACHE} RAY_VERSION=${RAY_VERSION} RAY_PORT=${RAY_PORT} SKIP_MODEL_DOWNLOAD=1"
   if [ -n "${HF_TOKEN}" ]; then
-    WORKER_ENV="${WORKER_ENV} HF_TOKEN=${HF_TOKEN}"
+    COMMON_WORKER_ENV="${COMMON_WORKER_ENV} HF_TOKEN=${HF_TOKEN}"
   fi
 
-  # Start the worker script via SSH (run in background)
-  # Use ssh -f with nohup to properly detach the process
-  # The sleep 1 at the end ensures SSH doesn't exit before nohup takes over
-  ssh -f "${WORKER_USER}@${WORKER_HOST}" "nohup bash -c '${WORKER_ENV} bash ~/start_worker_vllm.sh > ~/worker_setup.log 2>&1' </dev/null >/dev/null 2>&1 &"
-
-  # Give SSH a moment to start the remote process
+  # Launch each worker. Use ssh -f + nohup so the remote process detaches
+  # cleanly and our SSH returns immediately; we'll then poll Ray status.
+  for i in "${!WORKER_HOST_ARRAY[@]}"; do
+    ip="${WORKER_HOST_ARRAY[i]}"
+    worker_ib_ip="${WORKER_IB_IP_ARRAY[i]}"
+    worker_env="${COMMON_WORKER_ENV} WORKER_IP=${worker_ib_ip}"
+    log "  [$((i+1))/${WORKER_COUNT}] Launching worker on ${ip} (IB ${worker_ib_ip})..."
+    ssh -f "${WORKER_USER}@${ip}" "nohup bash -c '${worker_env} bash ~/start_worker_vllm.sh > ~/worker_setup.log 2>&1' </dev/null >/dev/null 2>&1 &"
+  done
   sleep 2
-
-  log "  Worker script started in background on ${WORKER_HOST}"
-  log "  Logs available at: ${WORKER_USER}@${WORKER_HOST}:~/worker_setup.log"
+  log "  Worker setup logs: ssh <worker-host> 'cat ~/worker_setup.log'"
   log ""
 
-  # Wait for worker to join the cluster (check for 2+ nodes)
-  log "  Waiting for worker to join Ray cluster..."
-  WORKER_JOINED=false
-  for i in {1..120}; do
+  # Wait for all workers to join the cluster.
+  # Per-worker join time on cold container start is ~60s; budget grows with N.
+  EXPECTED_NODES=$((WORKER_COUNT + 1))
+  WAIT_SECONDS=$((120 + 60 * WORKER_COUNT))
+  log "  Waiting for ${WORKER_COUNT} worker(s) to join Ray (target ${EXPECTED_NODES} nodes, timeout ${WAIT_SECONDS}s)..."
+  WORKERS_JOINED=false
+  for i in $(seq 1 "${WAIT_SECONDS}"); do
     NODE_COUNT=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep -E '^ [0-9]+ node_' | wc -l" 2>/dev/null || echo "0")
     CURRENT_GPUS=$(docker exec "${NAME}" bash -lc "ray status --address=127.0.0.1:${RAY_PORT} 2>/dev/null | grep -oE '[0-9.]+/[0-9.]+ GPU' | awk -F'/' '{print \$2}' | awk '{print int(\$1)}'" 2>/dev/null || echo "0")
     [ -z "${CURRENT_GPUS}" ] && CURRENT_GPUS=0
 
-    if [ "${NODE_COUNT}" -ge 2 ]; then
+    if [ "${NODE_COUNT}" -ge "${EXPECTED_NODES}" ]; then
       echo ""
-      log "  ✅ Worker joined cluster (${i}s) - ${NODE_COUNT} nodes, ${CURRENT_GPUS} GPUs"
-      WORKER_JOINED=true
+      log "  ✅ All workers joined cluster (${i}s) - ${NODE_COUNT} nodes, ${CURRENT_GPUS} GPUs"
+      WORKERS_JOINED=true
       break
     fi
 
     # Show spinner
     SPINNER="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     SPIN_CHAR="${SPINNER:$((i % 10)):1}"
-    printf "\r  %s Waiting for worker... [%ds elapsed, %s nodes]  " "${SPIN_CHAR}" "${i}" "${NODE_COUNT}"
+    printf "\r  %s Waiting for workers... [%ds elapsed, %s/%s nodes]  " "${SPIN_CHAR}" "${i}" "${NODE_COUNT}" "${EXPECTED_NODES}"
 
     sleep 1
   done
 
-  if [ "${WORKER_JOINED}" != "true" ]; then
+  if [ "${WORKERS_JOINED}" != "true" ]; then
     echo ""
-    log "  ⚠️  Worker did not join cluster within 120s"
-    log "     Check worker logs: ssh ${WORKER_USER}@${WORKER_HOST} 'cat ~/worker_setup.log'"
+    log "  ⚠️  Only ${NODE_COUNT}/${EXPECTED_NODES} nodes joined within ${WAIT_SECONDS}s"
+    log "     Check worker setup logs on each host:"
+    for ip in "${WORKER_HOST_ARRAY[@]}"; do
+      log "       ssh ${WORKER_USER}@${ip} 'cat ~/worker_setup.log'"
+    done
     log ""
     log "  Proceeding anyway - vLLM may fail if insufficient GPUs"
   fi
@@ -911,7 +954,7 @@ fi
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Step number depends on whether worker orchestration was used
-if [ -n "${WORKER_HOST}" ]; then
+if [ "${WORKER_COUNT}" -gt 0 ]; then
   VLLM_STEP=11
 else
   VLLM_STEP=8
@@ -1090,8 +1133,8 @@ fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if [ -n "${WORKER_HOST}" ]; then
-  echo "✅ Cluster is ready! (Head + Worker orchestrated)"
+if [ "${WORKER_COUNT}" -gt 0 ]; then
+  echo "✅ Cluster is ready! (Head + ${WORKER_COUNT} Worker(s) orchestrated)"
 elif [ "${SINGLE_NODE_MODE}" = "true" ]; then
   echo "✅ Single-node vLLM server is ready!"
 else
@@ -1104,13 +1147,17 @@ echo "  Ray Dashboard:  http://${PUBLIC_IP}:${RAY_DASHBOARD_PORT}"
 echo "  vLLM API:       http://${PUBLIC_IP}:${VLLM_PORT}"
 echo ""
 
-if [ -n "${WORKER_HOST}" ]; then
+if [ "${WORKER_COUNT}" -gt 0 ]; then
   echo "🖥️  Cluster Nodes:"
-  echo "  Head:   $(hostname) (${HEAD_IP})"
-  echo "  Worker: ${WORKER_HOST}"
+  echo "  Head:    $(hostname) (${HEAD_IP})"
+  for i in "${!WORKER_HOST_ARRAY[@]}"; do
+    echo "  Worker $((i+1)): ${WORKER_HOST_ARRAY[i]}"
+  done
   echo ""
-  echo "🔧 Worker Logs:"
-  echo "  ssh ${WORKER_USER}@${WORKER_HOST} 'cat ~/worker_setup.log'"
+  echo "🔧 Worker Logs (one command per worker):"
+  for ip in "${WORKER_HOST_ARRAY[@]}"; do
+    echo "  ssh ${WORKER_USER}@${ip} 'cat ~/worker_setup.log'"
+  done
   echo ""
 elif [ "${SINGLE_NODE_MODE}" = "true" ]; then
   echo "🖥️  Single-Node Configuration:"
@@ -1118,15 +1165,15 @@ elif [ "${SINGLE_NODE_MODE}" = "true" ]; then
   echo "  GPUs: ${TENSOR_PARALLEL} (tensor parallelism)"
   echo ""
   echo "🔗 To Add Worker Nodes Later:"
-  echo "    export WORKER_HOST=<worker_ethernet_ip>  # For SSH"
-  echo "    export WORKER_IB_IP=<worker_ib_ip>       # For NCCL"
+  echo "    export WORKER_HOST=\"<ip1> [<ip2> ...]\"     # Ethernet IP(s) for SSH"
+  echo "    export WORKER_IB_IP=\"<ib1> [<ib2> ...]\"    # InfiniBand IP(s) for NCCL"
   echo "    bash start_cluster.sh"
   echo ""
 else
   echo "🔗 Next Steps - Start Workers Automatically:"
   echo "  Set worker IPs and re-run start_cluster.sh:"
-  echo "    export WORKER_HOST=<worker_ethernet_ip>  # For SSH"
-  echo "    export WORKER_IB_IP=<worker_ib_ip>       # For NCCL"
+  echo "    export WORKER_HOST=\"<ip1> [<ip2> ...]\"     # Ethernet IP(s) for SSH"
+  echo "    export WORKER_IB_IP=\"<ib1> [<ib2> ...]\"    # InfiniBand IP(s) for NCCL"
   echo "    bash start_cluster.sh"
   echo ""
   echo "  Workers will be started automatically via SSH."
