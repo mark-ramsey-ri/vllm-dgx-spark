@@ -1023,6 +1023,7 @@ docker exec "${NAME}" bash -lc "
   export PYTHONUNBUFFERED=1
   export VLLM_LOGGING_LEVEL=INFO
   export VLLM_MXFP4_USE_MARLIN=1
+  ${VLLM_ATTENTION_BACKEND:+export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND}}
 
   nohup vllm serve ${MODEL} ${VLLM_ARGS} > /var/log/vllm.log 2>&1 &
   echo \$! > /var/run/vllm.pid
