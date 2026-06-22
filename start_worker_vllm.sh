@@ -218,6 +218,13 @@ if [ -n "${HF_TOKEN}" ]; then
   HF_TOKEN_ENV="-e HF_TOKEN=${HF_TOKEN}"
 fi
 
+# Only pass NCCL_NET_PLUGIN / NCCL_NET when explicitly set (e.g. socket
+# fallback). Passing them as EMPTY strings makes NCCL fail plugin discovery
+# ("Failed to initialize any NET plugin") and breaks RDMA.
+NCCL_NET_ENV=""
+[ -n "${NCCL_NET_PLUGIN:-}" ] && NCCL_NET_ENV="${NCCL_NET_ENV} -e NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
+[ -n "${NCCL_NET:-}" ] && NCCL_NET_ENV="${NCCL_NET_ENV} -e NCCL_NET=${NCCL_NET}"
+
 # Run container as root (required for NVIDIA/vLLM)
 docker run -d \
   --restart unless-stopped \
@@ -238,8 +245,7 @@ docker run -d \
   -e UCX_NET_DEVICES="${UCX_DEV}" \
   -e OMPI_MCA_btl_tcp_if_include="${OMPI_MCA_IF}" \
   -e NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}" \
-  -e NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-}" \
-  -e NCCL_NET="${NCCL_NET:-}" \
+  ${NCCL_NET_ENV} \
   -e NCCL_IB_HCA="${NCCL_IB_HCA}" \
   -e NCCL_NET_GDR_LEVEL=5 \
   -e NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \

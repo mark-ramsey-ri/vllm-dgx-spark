@@ -583,9 +583,12 @@ else
     -e NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
     -e NCCL_IB_HCA="${NCCL_IB_HCA}"
     -e NCCL_NET_GDR_LEVEL=5
-    -e NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-}"
-    -e NCCL_NET="${NCCL_NET:-}"
   )
+  # Only pass NCCL_NET_PLUGIN / NCCL_NET when explicitly set (e.g. the
+  # socket-fallback combo). Passing them as EMPTY strings makes NCCL fail
+  # plugin discovery ("Failed to initialize any NET plugin") and breaks RDMA.
+  [ -n "${NCCL_NET_PLUGIN:-}" ] && ENV_ARGS+=(-e NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN}")
+  [ -n "${NCCL_NET:-}" ] && ENV_ARGS+=(-e NCCL_NET="${NCCL_NET}")
 fi
 
 # Add HuggingFace token if provided
@@ -870,6 +873,12 @@ if [ "${WORKER_COUNT}" -gt 0 ]; then
   fi
   if [ -n "${NCCL_NET:-}" ]; then
     COMMON_WORKER_ENV="${COMMON_WORKER_ENV} NCCL_NET=${NCCL_NET}"
+  fi
+  # Forward the head's chosen IB HCA so workers pin to the SAME single port.
+  # Without this, the worker script auto-detects all (Up) HCAs; on hosts with
+  # two RoCE ports on one subnet that re-introduces the dual-HCA NCCL hang.
+  if [ -n "${NCCL_IB_HCA:-}" ]; then
+    COMMON_WORKER_ENV="${COMMON_WORKER_ENV} NCCL_IB_HCA=${NCCL_IB_HCA}"
   fi
 
   # Launch each worker. Use ssh -f + nohup so the remote process detaches
