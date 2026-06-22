@@ -427,7 +427,54 @@ download_model() {
   HF_HOME="${HF_CACHE}" hf download "${model}" ${token_arg} --exclude "original/*" --exclude "metal/*" 2>&1 | tail -10
 }
 
+# Start (or verify) rsyncd on a worker, bound to its QSFP IP, allowing only
+# the head's QSFP IP. Idempotent. Returns 0 if a daemon is up afterwards.
+_ensure_worker_rsyncd() {
+  local host="$1" worker_user="$2" worker_hf_cache="$3"
+  local port="${RSYNCD_PORT:-8873}"
+
+  local head_ip
+  head_ip=$(ip -4 route get "${host}" 2>/dev/null \
+    | awk '/src/{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}')
+  if [ -z "${head_ip}" ]; then
+    log "  ERROR: could not determine head IP toward ${host}"
+    return 1
+  fi
+
+  ssh -o BatchMode=yes "${worker_user}@${host}" \
+    bash -s -- "${host}" "${head_ip}" "${port}" "${worker_hf_cache}" <<'REMOTE_EOF'
+set -e
+worker_ip="$1"; head_ip="$2"; port="$3"; cache_root="$4"
+pidf=/tmp/rsyncd-vllm.pid
+conf=/tmp/rsyncd-vllm.conf
+if [ -s "${pidf}" ] && kill -0 "$(cat "${pidf}")" 2>/dev/null; then
+  exit 0
+fi
+mkdir -p "${cache_root}/hub"
+cat >"${conf}" <<EOF
+use chroot = false
+pid file = ${pidf}
+log file = /tmp/rsyncd-vllm.log
+port = ${port}
+address = ${worker_ip}
+
+[hf-cache]
+    path = ${cache_root}/hub
+    read only = false
+    hosts allow = ${head_ip}
+    hosts deny = *
+EOF
+rsync --daemon --config="${conf}"
+for _ in 1 2 3 4 5; do
+  [ -s "${pidf}" ] && kill -0 "$(cat "${pidf}")" 2>/dev/null && exit 0
+  sleep 0.2
+done
+exit 1
+REMOTE_EOF
+}
+
 # Rsync model to all worker nodes (1 to N). Sequential, with progress per worker.
+# Transport selected by $RSYNC_TRANSPORT (rsyncd | ssh | nc); see config.env.
 rsync_model_to_worker() {
   local model="$1"
   local worker_user="${WORKER_USER:-$(whoami)}"
@@ -456,20 +503,60 @@ rsync_model_to_worker() {
   log "  Source: ${local_path}"
   log "  Dest:   ${worker_hf_cache}/hub/ on each worker"
 
+  local transport="${RSYNC_TRANSPORT:-rsyncd}"
   local rsync_failures=0
   for i in "${!worker_hosts[@]}"; do
     local host="${worker_hosts[i]}"
-    log "  [$((i+1))/${#worker_hosts[@]}] -> ${worker_user}@${host}"
+    log "  [$((i+1))/${#worker_hosts[@]}] -> ${worker_user}@${host}  (transport=${transport})"
     ssh "${worker_user}@${host}" "mkdir -p ${worker_hf_cache}/hub" 2>/dev/null || true
-    if ! rsync -a --info=progress2 --human-readable \
-      --no-perms --no-owner --no-group \
-      --exclude='.locks' \
-      --exclude='*.lock' \
-      "${local_path}" \
-      "${worker_user}@${host}:${worker_hf_cache}/hub/"; then
-      log "  WARNING: rsync to ${host} failed"
-      rsync_failures=$((rsync_failures + 1))
-    fi
+
+    case "${transport}" in
+      rsyncd)
+        if ! _ensure_worker_rsyncd "${host}" "${worker_user}" "${worker_hf_cache}"; then
+          log "  WARNING: rsyncd setup on ${host} failed (try RSYNC_TRANSPORT=ssh)"
+          rsync_failures=$((rsync_failures + 1))
+          continue
+        fi
+        if ! rsync -a --info=progress2 --human-readable \
+          --no-perms --no-owner --no-group --partial \
+          --exclude='.locks' --exclude='*.lock' \
+          "${local_path}" \
+          "rsync://${host}:${RSYNCD_PORT:-8873}/hf-cache/"; then
+          log "  WARNING: rsync (rsyncd) to ${host} failed"
+          rsync_failures=$((rsync_failures + 1))
+        fi
+        ;;
+      ssh)
+        if ! rsync -a --info=progress2 --human-readable \
+          --no-perms --no-owner --no-group \
+          --exclude='.locks' --exclude='*.lock' \
+          "${local_path}" \
+          "${worker_user}@${host}:${worker_hf_cache}/hub/"; then
+          log "  WARNING: rsync (ssh) to ${host} failed"
+          rsync_failures=$((rsync_failures + 1))
+        fi
+        ;;
+      nc)
+        # Worker listener wipes the target dir then extracts; head streams via tar|nc.
+        # No resume, no integrity check beyond TCP — trusted private fabric only.
+        ssh "${worker_user}@${host}" \
+          "rm -rf ${worker_hf_cache}/hub/${cache_name} && nc -l -p ${NC_PORT:-8874} | tar -xf - -C ${worker_hf_cache}/hub" \
+          </dev/null >/dev/null 2>&1 &
+        local listener_pid=$!
+        sleep 2
+        if tar -cf - -C "${HF_CACHE}/hub" "${cache_name}" | nc -N "${host}" "${NC_PORT:-8874}"; then
+          wait "${listener_pid}" || true
+        else
+          log "  WARNING: nc transfer to ${host} failed"
+          kill "${listener_pid}" 2>/dev/null || true
+          rsync_failures=$((rsync_failures + 1))
+        fi
+        ;;
+      *)
+        log "  ERROR: unknown RSYNC_TRANSPORT='${transport}' (expected: rsyncd|ssh|nc)"
+        rsync_failures=$((rsync_failures + 1))
+        ;;
+    esac
   done
 
   if [ "${rsync_failures}" -gt 0 ]; then
