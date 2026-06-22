@@ -974,7 +974,10 @@ VLLM_ARGS="${VLLM_ARGS} --port ${VLLM_PORT}"
 VLLM_ARGS="${VLLM_ARGS} --tensor-parallel-size ${TENSOR_PARALLEL}"
 VLLM_ARGS="${VLLM_ARGS} --max-model-len ${MAX_MODEL_LEN}"
 VLLM_ARGS="${VLLM_ARGS} --gpu-memory-utilization ${GPU_MEMORY_UTIL}"
-VLLM_ARGS="${VLLM_ARGS} --download-dir /root/.cache/huggingface"
+# No --download-dir: vLLM inherits HF_HOME (=/root/.cache/huggingface) and uses
+# its standard hub/ subdir, matching where `hf download` already staged the
+# weights. Passing --download-dir set vLLM's HF cache_dir to the parent of hub/,
+# so it re-downloaded the model into a second location (issue #14).
 VLLM_ARGS="${VLLM_ARGS} --load-format ${LOAD_FORMAT}"
 
 # Add optional flags
