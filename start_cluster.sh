@@ -577,10 +577,14 @@ else
     -e NCCL_SOCKET_IFNAME="${NCCL_IF}"
     -e UCX_NET_DEVICES="${UCX_DEV}"
     -e OMPI_MCA_btl_tcp_if_include="${OMPI_MCA_IF}"
-    # NCCL InfiniBand settings
-    -e NCCL_IB_DISABLE=0
+    # NCCL InfiniBand settings. To force TCP-on-QSFP fallback (when IB verbs
+    # or the NCCL RDMA Plugin hang during init), set in config.local.env:
+    #   NCCL_IB_DISABLE=1, NCCL_NET_PLUGIN=none, NCCL_NET=Socket
+    -e NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
     -e NCCL_IB_HCA="${NCCL_IB_HCA}"
     -e NCCL_NET_GDR_LEVEL=5
+    -e NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-}"
+    -e NCCL_NET="${NCCL_NET:-}"
   )
 fi
 
@@ -857,6 +861,15 @@ if [ "${WORKER_COUNT}" -gt 0 ]; then
   COMMON_WORKER_ENV="HEAD_IP=${HEAD_IP} MASTER_ADDR=${HEAD_IP} MODEL=${MODEL} HF_CACHE=${WORKER_HF_CACHE} RAY_VERSION=${RAY_VERSION} RAY_PORT=${RAY_PORT} SKIP_MODEL_DOWNLOAD=1"
   if [ -n "${HF_TOKEN}" ]; then
     COMMON_WORKER_ENV="${COMMON_WORKER_ENV} HF_TOKEN=${HF_TOKEN}"
+  fi
+  if [ -n "${NCCL_IB_DISABLE:-}" ]; then
+    COMMON_WORKER_ENV="${COMMON_WORKER_ENV} NCCL_IB_DISABLE=${NCCL_IB_DISABLE}"
+  fi
+  if [ -n "${NCCL_NET_PLUGIN:-}" ]; then
+    COMMON_WORKER_ENV="${COMMON_WORKER_ENV} NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
+  fi
+  if [ -n "${NCCL_NET:-}" ]; then
+    COMMON_WORKER_ENV="${COMMON_WORKER_ENV} NCCL_NET=${NCCL_NET}"
   fi
 
   # Launch each worker. Use ssh -f + nohup so the remote process detaches

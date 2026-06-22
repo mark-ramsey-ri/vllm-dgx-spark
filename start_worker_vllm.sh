@@ -237,7 +237,9 @@ docker run -d \
   -e NCCL_SOCKET_IFNAME="${NCCL_IF}" \
   -e UCX_NET_DEVICES="${UCX_DEV}" \
   -e OMPI_MCA_btl_tcp_if_include="${OMPI_MCA_IF}" \
-  -e NCCL_IB_DISABLE=0 \
+  -e NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}" \
+  -e NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-}" \
+  -e NCCL_NET="${NCCL_NET:-}" \
   -e NCCL_IB_HCA="${NCCL_IB_HCA}" \
   -e NCCL_NET_GDR_LEVEL=5 \
   -e NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \
